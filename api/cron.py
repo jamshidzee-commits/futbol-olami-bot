@@ -1,24 +1,25 @@
-
 import os
-import io
 import json
 import html
 import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
 from http.server import BaseHTTPRequestHandler
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 API_KEY = os.environ.get("FOOTBALL_API_KEY")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 CRON_SECRET = os.environ.get("CRON_SECRET")
-
 API_URL = "https://v3.football.api-sports.io"
 TASHKENT = ZoneInfo("Asia/Tashkent")
+FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+FONT_REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
+FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
 
 LEAGUE_IDS = {
-    39: "ANGLIYA — PREMIER LEAGUE",
+    39: "ANGLIYA — PREMIER LIGA",
     140: "ISPANIYA — LA LIGA",
     135: "ITALIYA — SERIE A",
     78: "GERMANIYA — BUNDESLIGA",
@@ -28,16 +29,10 @@ LEAGUE_IDS = {
     848: "KONFERENSIYALAR LIGASI",
 }
 
-# Faqat rasmga sig‘adigan miqdor. Kerak bo‘lsa keyin ko‘paytiramiz.
-MAX_TODAY_MATCHES = 24
-MAX_YESTERDAY_MATCHES = 18
 
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+def font(size, bold=False):
+    return ImageFont.truetype(FONT_BOLD if bold else FONT_REGULAR, size)
 
-def font(size, bold=True):
-    path = FONT_BOLD if bold else FONT_REG
-    return ImageFont.truetype(path, size)
 
 def api_get(endpoint, params):
     r = requests.get(
@@ -52,276 +47,189 @@ def api_get(endpoint, params):
         raise Exception(str(data["errors"]))
     return data.get("response", [])
 
-def get_selected_fixtures(date_string):
-    fixtures = api_get("fixtures", {
-        "date": date_string,
-        "timezone": "Asia/Tashkent",
-    })
+
+def selected_fixtures(date_string):
+    fixtures = api_get("fixtures", {"date": date_string, "timezone": "Asia/Tashkent"})
     result = []
     for m in fixtures:
         league = m.get("league", {})
         lid = league.get("id")
         country = league.get("country", "")
         if lid in LEAGUE_IDS:
-            m["league_name"] = LEAGUE_IDS[lid]
+            m["display_league"] = LEAGUE_IDS[lid]
             result.append(m)
         elif country == "Uzbekistan":
-            m["league_name"] = "O‘ZBEKISTON — " + league.get("name", "FUTBOL").upper()
+            m["display_league"] = "O‘ZBEKISTON — " + league.get("name", "FUTBOL")
             result.append(m)
-    result.sort(key=lambda x: (x.get("league_name",""), x.get("fixture",{}).get("date","")))
+    result.sort(key=lambda x: (x.get("display_league", ""), x.get("fixture", {}).get("date", "")))
     return result
 
-def get_logo(url):
-    if not url:
-        return None
+
+def crest(url, size=54):
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        return Image.open(io.BytesIO(r.content)).convert("RGBA")
-    except Exception as e:
-        print("logo error:", e)
+        im = Image.open(BytesIO(r.content)).convert("RGBA")
+        im.thumbnail((size, size), Image.Resampling.LANCZOS)
+        return im
+    except Exception:
         return None
 
-def fit_logo(im, size=54):
-    if im is None:
-        return None
-    im.thumbnail((size, size), Image.Resampling.LANCZOS)
-    canvas = Image.new("RGBA", (size, size), (0,0,0,0))
-    x=(size-im.width)//2
-    y=(size-im.height)//2
-    canvas.alpha_composite(im, (x,y))
-    return canvas
 
-def text_width(draw, text, f):
-    box = draw.textbbox((0,0), text, font=f)
-    return box[2]-box[0]
+def fit_text(draw, text, max_width, start_size, min_size=16, bold=False):
+    size = start_size
+    while size > min_size:
+        f = font(size, bold)
+        if draw.textbbox((0, 0), text, font=f)[2] <= max_width:
+            return f
+        size -= 1
+    return font(min_size, bold)
 
-def draw_centered(draw, text, y, f, fill):
-    w=text_width(draw,text,f)
-    draw.text(((1080-w)//2,y), text, font=f, fill=fill)
 
-def make_background(h):
-    img=Image.new("RGB",(1080,h),(4,14,28))
-    p=img.load()
-    for y in range(h):
-        t=y/max(1,h-1)
-        for x in range(1080):
-            glow=max(0,1-((x-540)**2+(y-h*0.78)**2)**0.5/900)
-            p[x,y]=(4+int(3*t),13+int(12*t),27+int(22*t)+int(12*glow))
-    d=ImageDraw.Draw(img,"RGBA")
-    # subtle diagonal geometry
-    for i in range(-500,1500,180):
-        d.polygon([(i,0),(i+70,0),(i-250,h),(i-320,h)],fill=(20,105,170,20))
-    # stadium glow at bottom
-    for rad in range(600,80,-12):
-        a=max(3,int((600-rad)*0.18))
-        d.ellipse((540-rad,h-125-rad*0.23,540+rad,h-125+rad*0.23),
-                  outline=(30,150,230,a),width=3)
-    d.rectangle((0,h-330,1080,h),fill=(2,24,31,110))
-    return img
+def make_card(title, date_string, matches):
+    W, H = 1080, 1350
+    img = Image.new("RGB", (W, H), (5, 15, 29))
+    d = ImageDraw.Draw(img, "RGBA")
 
-def draw_header(img, title, date_obj, live=False):
-    d=ImageDraw.Draw(img,"RGBA")
-    # football icon
-    d.ellipse((48,42,150,144),fill=(10,110,190,45),outline=(60,190,255,180),width=3)
-    d.ellipse((66,60,132,126),outline=(210,235,255,180),width=2)
-    d.polygon([(99,77),(114,88),(110,105),(91,105),(86,89)],fill=(245,248,250,245))
-    d.text((175,48),"FUTBOL OLAMI",font=font(52),fill=(245,250,255,255))
-    d.text((178,108),"FUTBOL HAQIDA HAMMASI!",font=font(21,False),fill=(150,215,245,255))
+    # Background
+    for y in range(H):
+        t = y / H
+        d.line((0, y, W, y), fill=(4 + int(3*t), 14 + int(12*t), 28 + int(22*t), 255))
+    for x in range(-500, W + 500, 170):
+        d.polygon([(x, 0), (x+55, 0), (x-260, H), (x-315, H)], fill=(20, 100, 170, 22))
+    d.ellipse((70, 1050, 1010, 1500), fill=(8, 65, 95, 70))
+    d.line((70, 1120, 1010, 1120), fill=(50, 160, 220, 100), width=2)
 
-    y=175
-    d.rounded_rectangle((42,y,1038,y+118),25,fill=(5,28,47,240),outline=(40,145,205,190),width=2)
-    month=date_obj.strftime("%B").upper()
-    # Uzbek month mapping
-    months={1:"YANVAR",2:"FEVRAL",3:"MART",4:"APREL",5:"MAY",6:"IYUN",7:"IYUL",
-            8:"AVGUST",9:"SENTABR",10:"OKTABR",11:"NOYABR",12:"DEKABR"}
-    month=months[date_obj.month]
-    d.rounded_rectangle((62,y+18,210,y+100),15,fill=(245,250,255,255))
-    d.rounded_rectangle((62,y+18,210,y+45),15,fill=(235,55,55,255))
-    d.rectangle((62,y+33,210,y+45),fill=(235,55,55,255))
-    d.text((84,y+19),month,font=font(16),fill=(255,255,255,255))
-    day=str(date_obj.day)
-    d.text((94,y+43),day,font=font(40),fill=(8,25,40,255))
+    # Header
+    d.ellipse((45, 40, 150, 145), fill=(8, 100, 180, 60), outline=(75, 190, 255, 180), width=3)
+    d.ellipse((67, 62, 128, 123), fill=(240, 245, 250, 245))
+    d.polygon([(98, 74), (114, 86), (110, 104), (91, 104), (86, 86)], fill=(15, 25, 40, 255))
+    d.text((175, 52), "FUTBOL OLAMI", font=font(55, True), fill=(245, 250, 255, 255))
+    d.text((178, 112), "Futbol haqida hammasi!", font=font(23), fill=(150, 215, 245, 255))
 
-    d.text((245,y+15),title,font=font(34),fill=(250,252,255,255))
-    weekday={0:"DUSHANBA",1:"SESHANBA",2:"CHORSHANBA",3:"PAYSHANBA",
-             4:"JUMA",5:"SHANBA",6:"YAKSHANBA"}[date_obj.weekday()]
-    d.text((245,y+64),f"{date_obj.strftime('%d.%m.%Y')}  |  {weekday}",
-           font=font(20,False),fill=(155,205,235,255))
-    if live:
-        d.rounded_rectangle((875,y+28,1015,y+76),14,fill=(235,48,48,255))
-        d.ellipse((892,y+45,906,y+59),fill=(255,255,255,255))
-        d.text((918,y+34),"LIVE",font=font(22),fill=(255,255,255,255))
+    date = datetime.strptime(date_string, "%Y-%m-%d")
+    day = date.strftime("%d")
+    months = ["YANVAR", "FEVRAL", "MART", "APREL", "MAY", "IYUN", "IYUL", "AVGUST", "SENTABR", "OKTABR", "NOYABR", "DEKABR"]
+    weekdays = ["DUSHANBA", "SESHANBA", "CHORSHANBA", "PAYSHANBA", "JUMA", "SHANBA", "YAKSHANBA"]
 
-def draw_league(d, y, league_name):
-    d.rounded_rectangle((45,y,1035,y+58),15,fill=(7,35,53,250),outline=(40,120,165,160),width=2)
-    d.text((68,y+15),league_name,font=font(21),fill=(245,250,255,255))
-    return y+64
+    d.rounded_rectangle((45, 190, 215, 330), 18, fill=(245, 250, 255, 250))
+    d.rounded_rectangle((45, 190, 215, 235), 18, fill=(235, 55, 55, 255))
+    d.rectangle((45, 213, 215, 235), fill=(235, 55, 55, 255))
+    d.text((68, 196), months[date.month-1], font=font(21, True), fill=(255,255,255,255))
+    d.text((83, 244), day, font=font(64, True), fill=(8, 25, 40, 255))
+    d.text((250, 195), title, font=font(40, True), fill=(250,252,255,255))
+    d.text((250, 250), f"{date.strftime('%d.%m.%Y')}  |  {weekdays[date.weekday()]}", font=font(22), fill=(155,205,235,255))
 
-def draw_match(d, img, y, match, completed):
-    # row
-    d.rounded_rectangle((52,y,1028,y+72),12,fill=(3,21,36,215))
-    d.line((70,y+71,1010,y+71),fill=(40,105,140,100),width=1)
-
-    fixture=match.get("fixture",{})
-    tm=fixture.get("date","")
-    time=tm[11:16] if len(tm)>=16 else "--:--"
-    status=fixture.get("status",{}).get("short","")
-    elapsed=fixture.get("status",{}).get("elapsed")
-    home=match.get("teams",{}).get("home",{})
-    away=match.get("teams",{}).get("away",{})
-    hn=home.get("name","?")
-    an=away.get("name","?")
-    hs=match.get("goals",{}).get("home")
-    ass=match.get("goals",{}).get("away")
-
-    d.text((68,y+23),time,font=font(19),fill=(220,235,245,255))
-
-    # team names
-    d.text((180,y+14),hn,font=font(18),fill=(245,248,252,255))
-    d.text((180,y+39),an,font=font(18),fill=(245,248,252,255))
-
-    hlogo=fit_logo(get_logo(home.get("logo")),48)
-    alogo=fit_logo(get_logo(away.get("logo")),48)
-    if hlogo: img.alpha_composite(hlogo,(535,y+8))
-    if alogo: img.alpha_composite(alogo,(535,y+34))
-
-    if status in ["FT","AET","P"]:
-        score=f"{hs if hs is not None else 0} : {ass if ass is not None else 0}"
-        d.rounded_rectangle((690,y+12,810,y+58),9,fill=(4,34,55,255),outline=(30,125,175,180),width=2)
-        sw=text_width(d,score,font(21))
-        d.text((750-sw//2,y+20),score,font=font(21),fill=(255,255,255,255))
-    elif status in ["1H","2H","HT","ET","BT","P"]:
-        score=f"{hs or 0} : {ass or 0}"
-        d.text((690,y+10),f"🔴 {elapsed or ''}'",font=font(16),fill=(255,85,85,255))
-        d.text((690,y+34),score,font=font(21),fill=(255,255,255,255))
+    y = 360
+    if not matches:
+        d.rounded_rectangle((45, y, W-45, y+120), 20, fill=(5, 28, 45, 240), outline=(40, 130, 185, 170), width=2)
+        d.text((80, y+38), "Bugun tanlangan musobaqalarda o‘yinlar yo‘q.", font=font(25, True), fill=(240,248,255,255))
     else:
-        d.text((690,y+25),"VS",font=font(20),fill=(75,190,245,255))
+        current = None
+        for m in matches:
+            league = m.get("display_league", "FUTBOL")
+            if league != current:
+                current = league
+                if y + 62 > 1080:
+                    break
+                d.rounded_rectangle((45, y, W-45, y+58), 14, fill=(7, 35, 55, 245), outline=(35, 120, 170, 180), width=2)
+                d.text((68, y+15), league, font=fit_text(d, league, 850, 24, 17, True), fill=(245,250,255,255))
+                y += 63
+            if y + 72 > 1080:
+                break
+            row = (55, y, W-55, y+70)
+            d.rounded_rectangle(row, 10, fill=(4, 22, 37, 225))
+            fx = m.get("fixture", {})
+            status = fx.get("status", {}).get("short", "")
+            tm = fx.get("date", "")
+            time = tm[11:16] if len(tm) >= 16 else "--:--"
+            home = m.get("teams", {}).get("home", {})
+            away = m.get("teams", {}).get("away", {})
+            hn = home.get("name", "?")
+            an = away.get("name", "?")
+            hf = crest(home.get("logo"), 46)
+            af = crest(away.get("logo"), 46)
+            d.text((70, y+23), time, font=font(19, True), fill=(225,240,250,255))
+            hf_x, af_x = 420, 650
+            if hf: img.paste(hf, (hf_x, y+12), hf)
+            if af: img.paste(af, (af_x, y+12), af)
+            hfont = fit_text(d, hn, 235, 20, 14)
+            afont = fit_text(d, an, 235, 20, 14)
+            hb = d.textbbox((0,0), hn, font=hfont)[2]
+            d.text((400-hb, y+22), hn, font=hfont, fill=(245,248,252,255))
+            d.text((710, y+22), an, font=afont, fill=(245,248,252,255))
+            if status in ["FT", "AET", "P"]:
+                hs = m.get("goals", {}).get("home")
+                ass = m.get("goals", {}).get("away")
+                score = f"{hs if hs is not None else 0} : {ass if ass is not None else 0}"
+                fill = (20, 80, 120, 230)
+            elif status in ["1H", "2H", "HT", "ET", "BT", "P"]:
+                hs = m.get("goals", {}).get("home") or 0
+                ass = m.get("goals", {}).get("away") or 0
+                minute = m.get("fixture", {}).get("status", {}).get("elapsed") or ""
+                score = f"LIVE {minute}'  {hs}:{ass}"
+                fill = (170, 35, 35, 230)
+            else:
+                score = "VS"
+                fill = (7, 50, 80, 230)
+            d.rounded_rectangle((500, y+14, 640, y+56), 10, fill=fill, outline=(50,150,210,150), width=1)
+            sb = d.textbbox((0,0), score, font=font(17, True))[2]
+            d.text((570-sb/2, y+24), score, font=font(17, True), fill=(255,255,255,255))
+            y += 76
 
-    # compact status label
-    if status in ["1H","2H","HT","ET","BT","P"]:
-        d.text((860,y+25),"LIVE",font=font(16),fill=(255,90,90,255))
-
-    return y+78
-
-def create_fixture_image(matches, title, date_string, max_matches):
-    date_obj=datetime.strptime(date_string,"%Y-%m-%d").date()
-    # reserve approx 140px per league header + rows; cap data
-    matches=matches[:max_matches]
-    leagues=[]
-    for m in matches:
-        if m["league_name"] not in leagues: leagues.append(m["league_name"])
-    h=390 + len(matches)*78 + len(leagues)*64 + 180
-    img=make_background(h).convert("RGBA")
-    draw_header(img,title,date_obj,any(m.get("fixture",{}).get("status",{}).get("short") in ["1H","2H","HT","ET","BT","P"] for m in matches))
-    d=ImageDraw.Draw(img,"RGBA")
-    y=325
-    current=None
-    for m in matches:
-        league=m["league_name"]
-        if league!=current:
-            y=draw_league(d,y,league)
-            current=league
-        y=draw_match(d,img,y,m,False)
-    # footer
-    d.text((70,h-120),"Futbol bizni birlashtiradi!",font=font(28),fill=(235,248,255,255))
-    d.text((70,h-78),"Futbol olami  •  Futbol haqida hammasi!",font=font(18,False),fill=(125,195,230,255))
+    d.text((60, 1160), "Futbol bizni birlashtiradi!", font=font(32, True), fill=(245,250,255,255))
+    d.text((60, 1210), "Futbol olami", font=font(29, True), fill=(90,205,255,255))
+    d.text((60, 1250), "Futbol haqida hammasi!", font=font(20), fill=(165,210,235,255))
     return img
 
-def send_photo(img, caption):
-    buf=io.BytesIO()
-    img.save(buf,format="PNG",optimize=True)
-    buf.seek(0)
-    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    r=requests.post(
-        url,
-        data={"chat_id":CHANNEL_ID,"caption":caption,"parse_mode":"HTML"},
-        files={"photo":("futbol-olami.png",buf,"image/png")},
-        timeout=45,
-    )
-    result=r.json()
-    if not result.get("ok"):
-        raise Exception(str(result))
-    return result
 
-def send_text(text):
-    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r=requests.post(url,json={
-        "chat_id":CHANNEL_ID,"text":text,"parse_mode":"HTML"
-    },timeout=20)
-    result=r.json()
+def send_photo(image, caption):
+    bio = BytesIO()
+    image.save(bio, format="PNG", optimize=True)
+    bio.seek(0)
+    r = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+        data={"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"},
+        files={"photo": ("futbol-olami.png", bio, "image/png")},
+        timeout=30,
+    )
+    result = r.json()
     if not result.get("ok"):
         raise Exception(str(result))
-    return result
+
 
 def run_bot():
-    now=datetime.now(TASHKENT)
-    today=now.date()
-    yesterday=today-timedelta(days=1)
+    now = datetime.now(TASHKENT)
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    for date_obj, title in [
+        (yesterday, "KECHAGI O‘YINLAR NATIJALARI"),
+        (today, "BUGUNGI O‘YINLAR"),
+    ]:
+        date_string = date_obj.strftime("%Y-%m-%d")
+        matches = selected_fixtures(date_string)
+        image = make_card(title, date_string, matches)
+        send_photo(image, "⚽ <b>FUTBOL OLAMI</b>\nFutbol haqida hammasi!")
 
-    ystr=yesterday.strftime("%Y-%m-%d")
-    tstr=today.strftime("%Y-%m-%d")
-
-    ymatches=get_selected_fixtures(ystr)
-    tmatches=get_selected_fixtures(tstr)
-
-    # Only create/send image if there are matches.
-    if ymatches:
-        img=create_fixture_image(
-            ymatches,
-            "KECHAGI O‘YINLAR NATIJALARI",
-            ystr,
-            MAX_YESTERDAY_MATCHES
-        )
-        send_photo(
-            img,
-            "🏁 <b>KECHAGI O‘YINLAR NATIJALARI</b>\n"
-            "📅 " + yesterday.strftime("%d.%m.%Y")
-        )
-    else:
-        send_text(
-            "⚽ <b>FUTBOL OLAMI</b>\n\n"
-            "Kecha tanlangan musobaqalarda o‘yinlar bo‘lmadi."
-        )
-
-    if tmatches:
-        img=create_fixture_image(
-            tmatches,
-            "BUGUNGI O‘YINLAR",
-            tstr,
-            MAX_TODAY_MATCHES
-        )
-        send_photo(
-            img,
-            "⚽ <b>BUGUNGI O‘YINLAR</b>\n"
-            "📅 " + today.strftime("%d.%m.%Y")
-        )
-    else:
-        send_text(
-            "⚽ <b>FUTBOL OLAMI</b>\n\n"
-            "Bugun tanlangan musobaqalarda o‘yinlar yo‘q."
-        )
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        authorization=self.headers.get("authorization","")
-        if not CRON_SECRET or authorization != f"Bearer {CRON_SECRET}":
+        if not CRON_SECRET or self.headers.get("authorization", "") != f"Bearer {CRON_SECRET}":
             self.send_response(401)
-            self.send_header("Content-Type","text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(b"Unauthorized")
             return
         try:
             run_bot()
-            body=json.dumps({"ok":True,"message":"Futbol olami image cron completed"},ensure_ascii=False)
+            body = json.dumps({"ok": True, "message": "Futbol olami image cron completed"}, ensure_ascii=False).encode()
             self.send_response(200)
-            self.send_header("Content-Type","application/json; charset=utf-8")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
-            self.wfile.write(body.encode("utf-8"))
+            self.wfile.write(body)
         except Exception as e:
-            print("CRON ERROR:",e)
-            body=json.dumps({"ok":False,"error":str(e)},ensure_ascii=False)
+            print(f"CRON ERROR: {e}")
+            body = json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False).encode()
             self.send_response(500)
-            self.send_header("Content-Type","application/json; charset=utf-8")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
-            self.wfile.write(body.encode("utf-8"))
+            self.wfile.write(body)
