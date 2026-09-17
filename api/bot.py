@@ -1,5 +1,6 @@
 import os
 import json
+import html
 import requests
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
@@ -10,7 +11,8 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")
 
 API_URL = "https://v3.football.api-sports.io/fixtures"
 
-LEAGUES = {
+# Нужные турниры
+LEAGUE_IDS = {
     39: "🇬🇧 Англия — Premier League",
     140: "🇪🇸 Испания — La Liga",
     135: "🇮🇹 Италия — Serie A",
@@ -23,37 +25,53 @@ LEAGUES = {
 
 
 def get_matches():
+
     today = datetime.now().strftime("%Y-%m-%d")
 
     headers = {
-        "x-apisports-key": API_KEY
+        "x-apisports-key": API_KEY,
+        "Accept": "application/json"
     }
+
+    params = {
+        "date": today,
+        "timezone": "Asia/Tashkent"
+    }
+
+    response = requests.get(
+        API_URL,
+        headers=headers,
+        params=params,
+        timeout=30
+    )
+
+    data = response.json()
+
+    # Если API вернул ошибку
+    if data.get("errors"):
+        return [], "API ERROR: " + str(data["errors"])
 
     matches = []
 
-    for league_id, league_name in LEAGUES.items():
+    for match in data.get("response", []):
 
-        params = {
-            "league": league_id,
-            "season": 2026,
-            "date": today,
-            "timezone": "Asia/Tashkent"
-        }
+        league = match.get("league", {})
+        league_id = league.get("id")
+        country = league.get("country", "")
 
-        response = requests.get(
-            API_URL,
-            headers=headers,
-            params=params,
-            timeout=20
-        )
-
-        data = response.json()
-
-        for match in data.get("response", []):
-            match["league_name"] = league_name
+        # Топ-5 + еврокубки
+        if league_id in LEAGUE_IDS:
+            match["league_name"] = LEAGUE_IDS[league_id]
             matches.append(match)
 
-    return matches
+        # Узбекистан
+        elif country == "Uzbekistan":
+            match["league_name"] = (
+                "🇺🇿 Uzbekistan — " + league.get("name", "Football")
+            )
+            matches.append(match)
+
+    return matches, None
 
 
 def send_message(text):
@@ -94,13 +112,14 @@ def make_message(matches):
         league = match["league_name"]
 
         if league != current_league:
-            message += f"\n<b>{league}</b>\n"
+            message += f"\n<b>{html.escape(league)}</b>\n"
             current_league = league
 
-        home = match["teams"]["home"]["name"]
-        away = match["teams"]["away"]["name"]
+        home = html.escape(match["teams"]["home"]["name"])
+        away = html.escape(match["teams"]["away"]["name"])
 
-        time = match["fixture"]["date"][11:16]
+        date_time = match["fixture"]["date"]
+        time = date_time[11:16]
 
         status = match["fixture"]["status"]["short"]
 
@@ -110,11 +129,11 @@ def make_message(matches):
             away_score = match["goals"]["away"]
 
             message += (
-                f"🏁 {time}  "
+                f"🏁 {time} — "
                 f"{home} <b>{home_score}:{away_score}</b> {away}\n"
             )
 
-        elif status in ["1H", "2H", "HT", "ET", "P"]:
+        elif status in ["1H", "2H", "HT", "ET", "BT", "P"]:
 
             home_score = match["goals"]["home"] or 0
             away_score = match["goals"]["away"] or 0
@@ -122,14 +141,14 @@ def make_message(matches):
             minute = match["fixture"]["status"].get("elapsed")
 
             message += (
-                f"🔴 LIVE {minute or ''}'  "
+                f"🔴 LIVE {minute or ''}' — "
                 f"{home} <b>{home_score}:{away_score}</b> {away}\n"
             )
 
         else:
 
             message += (
-                f"🕐 {time}  "
+                f"🕐 {time} — "
                 f"{home} ⚔️ {away}\n"
             )
 
@@ -148,9 +167,16 @@ class handler(BaseHTTPRequestHandler):
 
         try:
 
-            matches = get_matches()
-            text = make_message(matches)
-            result = send_message(text)
+            matches, error = get_matches()
+
+            if error:
+                result = send_message(
+                    f"⚠️ <b>Futbol olami — API xatosi</b>\n\n"
+                    f"<code>{html.escape(error)}</code>"
+                )
+            else:
+                text = make_message(matches)
+                result = send_message(text)
 
             self.send_response(200)
             self.send_header(
