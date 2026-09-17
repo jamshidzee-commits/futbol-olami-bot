@@ -911,7 +911,7 @@ def draw_standing_row(img, y, row):
     team_text, team_font = fit_text(d, name, 330, start=24, minimum=17)
     d.text((190, y+30), team_text, font=team_font, fill=(248, 252, 255, 255))
 
-    # I V N P Z P +/- O
+    # I V N P G O
     values = [
         (555, str(played)),
         (635, str(wins)),
@@ -929,15 +929,6 @@ def draw_standing_row(img, y, row):
             font=F(21, True),
             fill=(235, 246, 252, 255)
         )
-
-    # Goal difference between goals and points columns.
-    box = d.textbbox((0, 0), f"{gd:+d}", font=F(20, True))
-    d.text(
-        (915-(box[2]-box[0])/2, y+33),
-        f"{gd:+d}",
-        font=F(20, True),
-        fill=(235, 246, 252, 255)
-    )
 
 
 def make_standings_image(title, season, table, page_no=1, total_pages=1):
@@ -978,7 +969,7 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
     headers = [
         (78, "#"), (195, "JAMOA"),
         (555, "I"), (635, "V"), (710, "N"), (785, "P"),
-        (865, "Z:P"), (915, "+/-"), (950, "O"),
+        (865, "G"), (950, "O"),
     ]
     for x, text in headers:
         box = d.textbbox((0, 0), text, font=F(18, True))
@@ -992,7 +983,7 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
     footer_y = height - 125
     d.line((60, footer_y, W-60, footer_y), fill=(55, 135, 175, 150), width=2)
     d.text((70, footer_y+23), "Futbol bizni birlashtiradi!", font=F(27, True), fill=(238, 248, 255, 255))
-    d.text((70, footer_y+68), "I — o‘yinlar  •  V — g‘alaba  •  N — durang  •  P — mag‘lubiyat  •  Z:P — zabito:propusheno  •  O — ochko", font=F(16), fill=(125, 195, 225, 255))
+    d.text((70, footer_y+68), "I — o‘yinlar  •  V — g‘alaba  •  N — durang  •  P — mag‘lubiyat  •  G — gollar (zabito:propusheno)  •  O — ochko", font=F(16), fill=(125, 195, 225, 255))
 
     return img.convert("RGB")
 
