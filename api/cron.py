@@ -126,11 +126,10 @@ def get_logo(url):
         return None
 
 
-def draw_logo(canvas, logo_url, center_x, center_y, size=58):
-    logo = get_logo(logo_url)
+def draw_logo(image, logo_url, center_x, center_y, size=58):
+    draw = ImageDraw.Draw(image, "RGBA")
 
-    # Logo uchun yumshoq fon
-    canvas.ellipse(
+    draw.ellipse(
         (
             center_x - size // 2,
             center_y - size // 2,
@@ -142,12 +141,13 @@ def draw_logo(canvas, logo_url, center_x, center_y, size=58):
         width=2,
     )
 
+    logo = get_logo(logo_url)
     if logo:
         copy = logo.copy()
         copy.thumbnail((size - 10, size - 10), Image.Resampling.LANCZOS)
         x = center_x - copy.width // 2
         y = center_y - copy.height // 2
-        canvas.alpha_composite(copy, (x, y))
+        image.alpha_composite(copy, (x, y))
 
 
 def fixture_status(match):
@@ -167,7 +167,8 @@ def match_time(match):
     return value[11:16] if len(value) >= 16 else "--:--"
 
 
-def draw_match(canvas, y, match):
+def draw_match(canvas_image, y, match):
+    canvas = ImageDraw.Draw(canvas_image, "RGBA")
     home = match.get("teams", {}).get("home", {})
     away = match.get("teams", {}).get("away", {})
 
@@ -197,8 +198,8 @@ def draw_match(canvas, y, match):
     home_logo_url = home.get("logo")
     away_logo_url = away.get("logo")
 
-    draw_logo(canvas, home_logo_url, 385, y + 52, 60)
-    draw_logo(canvas, away_logo_url, 695, y + 52, 60)
+    draw_logo(canvas_image, home_logo_url, 385, y + 52, 60)
+    draw_logo(canvas_image, away_logo_url, 695, y + 52, 60)
 
     # Team nomlarini markazga yaqin joylashtiramiz
     home_font = font(22, True)
@@ -502,7 +503,7 @@ def build_image(title, date_string, page_groups, page_number, total_pages):
         y = league_header(image_draw := canvas, y, league)
 
         for match in matches:
-            draw_match(canvas, y, match)
+            draw_match(image, y, match)
             y += 115
 
         y += 10
