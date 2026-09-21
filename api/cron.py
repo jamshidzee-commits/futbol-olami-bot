@@ -621,158 +621,157 @@ def publish_matches(date_string, title):
 
 # ---------------- STANDINGS ----------------
 
-# Current-season tables are calculated from completed fixtures.
-# This avoids the API-Football Free-plan restriction on /standings.
+# API-Football Free plan blocks the /standings endpoint for the current
+# season.  We therefore build the table ourselves from completed fixtures.
+# This also gives us exactly the columns we want: I, V, N, P, G, O.
+
 STANDINGS_LEAGUES = [
-    (39, "ANGLIYA — PREMIER LIGA", False),
-    (140, "ISPANIYA — LA LIGA", False),
-    (135, "ITALIYA — SERIYA A", False),
-    (78, "GERMANIYA — BUNDESLIGA", False),
-    (61, "FRANSIYA — LIGUE 1", False),
-    (307, "SAUDIYA ARABIYASI — SAUDI PRO LEAGUE", False),
-    (94, "PORTUGALIYA — PRIMEIRA LIGA", False),
-    (88, "NIDERLANDIYA — EREDIVISIE", False),
-    (278, "O‘ZBEKISTON — SUPER LIGA", True),
+    (39, "ANGLIYA — PREMIER LIGA"),
+    (140, "ISPANIYA — LA LIGA"),
+    (135, "ITALIYA — SERIYA A"),
+    (78, "GERMANIYA — BUNDESLIGA"),
+    (61, "FRANSIYA — LIGUE 1"),
+    (307, "SAUDIYA ARABIYASI — SAUDI PRO LEAGUE"),
+    (94, "PORTUGALIYA — PRIMEIRA LIGA"),
+    (88, "NIDERLANDIYA — EREDIVISIE"),
+    (278, "O‘ZBEKISTON — SUPER LIGA"),
 ]
 
-def get_season_fixtures(league_id, season):
-    return api_get(
-        "fixtures",
-        {
-            "league": league_id,
-            "season": season,
-            "status": "FT-AET-PEN",
-            "timezone": "Asia/Tashkent",
-        },
-    )
+FINISHED_STATUSES = {"FT", "AET", "PEN"}
+
+
+def _fixture_is_finished(fixture):
+    status = ((fixture.get("fixture") or {}).get("status") or {}).get("short")
+    return status in FINISHED_STATUSES
+
+
+def _season_for_league(date_obj):
+    # European/Saudi/Portugal/Netherlands seasons span two calendar years.
+    # Uzbekistan Super League uses the calendar year.
+    return date_obj.year
+
+
+def get_league_fixtures(league_id, season, date_obj=None):
+    params = {
+        "league": league_id,
+        "season": season,
+        "timezone": "Asia/Tashkent",
+    }
+    if date_obj is not None:
+        params["date"] = date_obj.strftime("%Y-%m-%d")
+
+    return api_get("fixtures", params)
+
 
 def build_table_from_fixtures(fixtures):
     teams = {}
 
-    for m in fixtures:
-        status = m.get("fixture", {}).get("status", {}).get("short", "")
-        if status not in ("FT", "AET", "PEN"):
+    for fx in fixtures:
+        if not _fixture_is_finished(fx):
             continue
 
-        home = m.get("teams", {}).get("home", {}) or {}
-        away = m.get("teams", {}).get("away", {}) or {}
-        hg = m.get("goals", {}).get("home")
-        ag = m.get("goals", {}).get("away")
+        teams_data = fx.get("teams") or {}
+        goals = fx.get("goals") or {}
+        home = teams_data.get("home") or {}
+        away = teams_data.get("away") or {}
+        home_goals = goals.get("home")
+        away_goals = goals.get("away")
 
-        if hg is None or ag is None:
-            continue
         if not home.get("id") or not away.get("id"):
             continue
+        if home_goals is None or away_goals is None:
+            continue
 
-        def ensure(team):
+        def ensure_team(team):
             tid = team["id"]
             if tid not in teams:
                 teams[tid] = {
-                    "rank": 0,
-                    "team": {
-                        "name": team.get("name") or "?",
-                        "logo": team.get("logo"),
-                    },
-                    "all": {
-                        "played": 0,
-                        "win": 0,
-                        "draw": 0,
-                        "lose": 0,
-                        "goals": {"for": 0, "against": 0},
-                    },
+                    "id": tid,
+                    "name": team.get("name") or "?",
+                    "logo": team.get("logo"),
+                    "played": 0,
+                    "win": 0,
+                    "draw": 0,
+                    "lose": 0,
+                    "gf": 0,
+                    "ga": 0,
                     "points": 0,
-                    "goalsDiff": 0,
                 }
-            elif team.get("logo") and not teams[tid]["team"].get("logo"):
-                teams[tid]["team"]["logo"] = team["logo"]
+            elif not teams[tid].get("logo") and team.get("logo"):
+                teams[tid]["logo"] = team.get("logo")
             return teams[tid]
 
-        ht = ensure(home)
-        at = ensure(away)
+        h = ensure_team(home)
+        a = ensure_team(away)
 
-        ht["all"]["played"] += 1
-        at["all"]["played"] += 1
-        ht["all"]["goals"]["for"] += int(hg)
-        ht["all"]["goals"]["against"] += int(ag)
-        at["all"]["goals"]["for"] += int(ag)
-        at["all"]["goals"]["against"] += int(hg)
+        hg = int(home_goals)
+        ag = int(away_goals)
+
+        h["played"] += 1
+        a["played"] += 1
+        h["gf"] += hg
+        h["ga"] += ag
+        a["gf"] += ag
+        a["ga"] += hg
 
         if hg > ag:
-            ht["all"]["win"] += 1
-            at["all"]["lose"] += 1
-            ht["points"] += 3
+            h["win"] += 1
+            a["lose"] += 1
+            h["points"] += 3
         elif hg < ag:
-            at["all"]["win"] += 1
-            ht["all"]["lose"] += 1
-            at["points"] += 3
+            a["win"] += 1
+            h["lose"] += 1
+            a["points"] += 3
         else:
-            ht["all"]["draw"] += 1
-            at["all"]["draw"] += 1
-            ht["points"] += 1
-            at["points"] += 1
+            h["draw"] += 1
+            a["draw"] += 1
+            h["points"] += 1
+            a["points"] += 1
 
-    table = list(teams.values())
+    table = []
+    for row in teams.values():
+        table.append({
+            "rank": 0,
+            "team": {"name": row["name"], "logo": row["logo"]},
+            "all": {
+                "played": row["played"],
+                "win": row["win"],
+                "draw": row["draw"],
+                "lose": row["lose"],
+                "goals": {"for": row["gf"], "against": row["ga"]},
+            },
+            "goalsDiff": row["gf"] - row["ga"],
+            "points": row["points"],
+        })
 
-    for row in table:
-        gf = row["all"]["goals"]["for"]
-        ga = row["all"]["goals"]["against"]
-        row["goalsDiff"] = gf - ga
-
-    # Standard football ordering: points, goal difference, goals scored, name.
-    table.sort(
-        key=lambda r: (
-            -r["points"],
-            -r["goalsDiff"],
-            -r["all"]["goals"]["for"],
-            r["team"]["name"].lower(),
-        )
-    )
+    # Standard football ordering. Goal difference is used only for sorting;
+    # it is deliberately NOT displayed in the image.
+    table.sort(key=lambda r: (
+        -r["points"],
+        -r["goalsDiff"],
+        -r["all"]["goals"]["for"],
+        r["team"]["name"].lower(),
+    ))
 
     for rank, row in enumerate(table, 1):
         row["rank"] = rank
 
     return table
 
-def table_signature(table):
-    # Compare actual table data, not just the position.
-    return [
-        (
-            row["team"]["name"],
-            row["all"]["played"],
-            row["all"]["win"],
-            row["all"]["draw"],
-            row["all"]["lose"],
-            row["all"]["goals"]["for"],
-            row["all"]["goals"]["against"],
-            row["points"],
-        )
-        for row in table
-    ]
 
-def load_saved_tables():
-    # Vercel's local filesystem is not persistent between deployments.
-    # This file is only a local safety fallback; the first run establishes
-    # the current baseline. Persistent comparison can later be moved to Blob/KV.
-    path = os.path.join("/tmp", "futbol_olami_tables.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def league_had_results_yesterday(league_id, date_obj):
+    fixtures = get_league_fixtures(league_id, _season_for_league(date_obj), date_obj)
+    return any(_fixture_is_finished(fx) for fx in fixtures)
 
-def save_saved_tables(saved):
-    path = os.path.join("/tmp", "futbol_olami_tables.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(saved, f, ensure_ascii=False)
 
-def get_current_standings(league_id, season, calendar_year=False):
-    fixtures = get_season_fixtures(league_id, season)
-    if not fixtures:
-        raise Exception("No fixtures returned for this league/season")
+def get_current_league_table(league_id, date_obj):
+    season = _season_for_league(date_obj)
+    fixtures = get_league_fixtures(league_id, season)
     table = build_table_from_fixtures(fixtures)
     if not table:
-        raise Exception("No completed fixtures available")
-    return table
+        raise Exception("No completed fixtures found for current season")
+    return season, table
+
 
 def draw_standing_row(img, y, row):
     d = ImageDraw.Draw(img, "RGBA")
@@ -789,6 +788,7 @@ def draw_standing_row(img, y, row):
     goals = row.get("all", {}).get("goals", {})
     gf = goals.get("for", 0)
     ga = goals.get("against", 0)
+    gd = row.get("goalsDiff", gf - ga)
     points = row.get("points", 0)
 
     fill = (7, 31, 49, 255) if int(rank or 0) % 2 else (8, 37, 57, 255)
@@ -796,11 +796,15 @@ def draw_standing_row(img, y, row):
         fill = (8, 48, 70, 255)
 
     d.rounded_rectangle(
-        (45, y, W-45, y+92), 14,
-        fill=fill, outline=(34, 105, 145, 180), width=1
+        (45, y, W-45, y+92),
+        14,
+        fill=fill,
+        outline=(34, 105, 145, 180),
+        width=1
     )
 
     d.text((68, y+27), str(rank), font=F(25, True), fill=(245, 250, 255, 255))
+
     draw_logo(img, team.get("logo"), 145, y+46, 58)
 
     team_text, team_font = fit_text(d, name, 330, start=24, minimum=17)
@@ -825,6 +829,7 @@ def draw_standing_row(img, y, row):
             fill=(235, 246, 252, 255)
         )
 
+
 def make_standings_image(title, season, table, page_no=1, total_pages=1):
     rows = table[:20]
     height = 330 + len(rows)*102 + 150
@@ -845,42 +850,29 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
             fill=(25, 125, 190, 30)
         )
 
-    d.ellipse((55, 40, 155, 140), fill=(10, 72, 112, 110),
-              outline=(70, 185, 240, 230), width=3)
+    d.ellipse((55, 40, 155, 140), fill=(10, 72, 112, 110), outline=(70, 185, 240, 230), width=3)
     d.text((82, 57), "F", font=F(50, True), fill=(255, 255, 255, 255))
-    d.text((185, 52), "FUTBOL OLAMI", font=F(47, True),
-           fill=(245, 250, 255, 255))
-    d.text((188, 108), "Futbol haqida hammasi!", font=F(21),
-           fill=(130, 205, 245, 255))
+    d.text((185, 52), "FUTBOL OLAMI", font=F(47, True), fill=(245, 250, 255, 255))
+    d.text((188, 108), "Futbol haqida hammasi!", font=F(21), fill=(130, 205, 245, 255))
 
-    d.text((55, 178), title, font=F(34, True),
-           fill=(248, 252, 255, 255))
-    d.text((58, 225), f"{season}/{season+1} MAVSUMI", font=F(20),
-           fill=(145, 200, 230, 255))
+    d.text((55, 178), title, font=F(34, True), fill=(248, 252, 255, 255))
+    d.text((58, 225), f"{season}/{season+1} MAVSUMI", font=F(20), fill=(145, 200, 230, 255))
 
     if total_pages > 1:
-        d.rounded_rectangle((900, 175, 1018, 229), 16,
-                            fill=(7, 105, 155, 235))
-        d.text((926, 187), f"{page_no}/{total_pages}",
-               font=F(20, True), fill=(255, 255, 255, 255))
+        d.rounded_rectangle((900, 175, 1018, 229), 16, fill=(7, 105, 155, 235))
+        d.text((926, 187), f"{page_no}/{total_pages}", font=F(20, True), fill=(255, 255, 255, 255))
 
     y = 275
-    d.rounded_rectangle((45, y, W-45, y+55), 13,
-                        fill=(7, 63, 91, 255),
-                        outline=(45, 140, 195, 230), width=2)
+    d.rounded_rectangle((45, y, W-45, y+55), 13, fill=(7, 63, 91, 255), outline=(45, 140, 195, 230), width=2)
 
     headers = [
         (78, "#"), (195, "JAMOA"),
         (555, "I"), (635, "V"), (710, "N"), (785, "P"),
         (865, "G"), (950, "O"),
     ]
-    for x, text_h in headers:
-        box = d.textbbox((0, 0), text_h, font=F(18, True))
-        d.text(
-            (x-(box[2]-box[0])/2 if x != 195 else x, y+16),
-            text_h, font=F(18, True),
-            fill=(175, 225, 245, 255)
-        )
+    for x, text in headers:
+        box = d.textbbox((0, 0), text, font=F(18, True))
+        d.text((x-(box[2]-box[0])/2 if x != 195 else x, y+16), text, font=F(18, True), fill=(175, 225, 245, 255))
 
     y += 68
     for row in rows:
@@ -888,17 +880,34 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
         y += 102
 
     footer_y = height - 125
-    d.line((60, footer_y, W-60, footer_y),
-           fill=(55, 135, 175, 150), width=2)
-    d.text((70, footer_y+23), "Futbol bizni birlashtiradi!",
-           font=F(27, True), fill=(238, 248, 255, 255))
-    d.text(
-        (70, footer_y+68),
-        "I — o‘yinlar  •  V — g‘alaba  •  N — durang  •  P — mag‘lubiyat  •  G — gollar (zabito:propusheno)  •  O — ochko",
-        font=F(16), fill=(125, 195, 225, 255)
-    )
+    d.line((60, footer_y, W-60, footer_y), fill=(55, 135, 175, 150), width=2)
+    d.text((70, footer_y+23), "Futbol bizni birlashtiradi!", font=F(27, True), fill=(238, 248, 255, 255))
+    d.text((70, footer_y+68), "I — o‘yinlar  •  V — g‘alaba  •  N — durang  •  P — mag‘lubiyat  •  G — gollar (zabito:propusheno)  •  O — ochko", font=F(16), fill=(125, 195, 225, 255))
 
     return img.convert("RGB")
+
+
+def publish_standings(date_obj):
+    changed = 0
+
+    for league_id, title in STANDINGS_LEAGUES:
+        try:
+            # A completed match changes at least I/G and therefore the table.
+            # We use yesterday's results as the change detector, so no state
+            # file/database is needed and this works reliably on Vercel.
+            if not league_had_results_yesterday(league_id, date_obj - timedelta(days=1)):
+                print("STANDINGS NO CHANGE:", title)
+                continue
+
+            season, table = get_current_league_table(league_id, date_obj)
+            publish_standing_table(title, season, table)
+            changed += 1
+            print("STANDINGS OK:", title, len(table))
+        except Exception as e:
+            print("STANDINGS ERROR:", title, str(e))
+
+    print("STANDINGS CHECK COMPLETE, CHANGED:", changed)
+
 
 def publish_standing_table(title, season, table):
     page_size = 20
@@ -915,38 +924,6 @@ def publish_standing_table(title, season, table):
         if total > 1:
             caption += f"\nSahifa: {page_no}/{total}"
         send_photo(img, caption)
-
-def publish_standings(date_obj):
-    saved = load_saved_tables()
-    season = date_obj.year if date_obj.month >= 7 else date_obj.year - 1
-    changed_count = 0
-
-    for league_id, title, calendar_year in STANDINGS_LEAGUES:
-        try:
-            league_season = date_obj.year if calendar_year else season
-            table = get_current_standings(league_id, league_season, calendar_year)
-            signature = table_signature(table)
-            old_signature = saved.get(str(league_id))
-
-            if old_signature is None:
-                # First successful run: establish baseline without posting.
-                saved[str(league_id)] = signature
-                print("STANDINGS BASELINE:", title, len(table))
-                continue
-
-            if old_signature != signature:
-                publish_standing_table(title, league_season, table)
-                saved[str(league_id)] = signature
-                changed_count += 1
-                print("STANDINGS CHANGED:", title, len(table))
-            else:
-                print("STANDINGS UNCHANGED:", title)
-
-        except Exception as e:
-            print("STANDINGS ERROR:", title, str(e))
-
-    save_saved_tables(saved)
-    print("STANDINGS CHECK COMPLETE, CHANGED:", changed_count)
 
 
 def run_bot():
@@ -975,20 +952,10 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
-            self.wfile.write(
-                json.dumps(
-                    {"ok": True, "message": "Futbol olami cron completed"},
-                    ensure_ascii=False
-                ).encode("utf-8")
-            )
+            self.wfile.write(json.dumps({"ok": True, "message": "Futbol olami cron completed"}, ensure_ascii=False).encode("utf-8"))
         except Exception as e:
             print("CRON ERROR:", e)
             self.send_response(500)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
-            self.wfile.write(
-                json.dumps(
-                    {"ok": False, "error": str(e)},
-                    ensure_ascii=False
-                ).encode("utf-8")
-            )
+            self.wfile.write(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False).encode("utf-8"))
