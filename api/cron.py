@@ -141,6 +141,7 @@ HIGHLIGHTLY_URL = "https://soccer.highlightly.net"
 logo_cache = {}
 MATCHES_CACHE = {}
 HIGHLIGHTS_CACHE = {}
+TARGET_HIGHLIGHTS_CACHE = {}
 
 
 def F(size, bold=False):
@@ -307,6 +308,46 @@ def get_highlights(date_string):
     except Exception as e:
         print("HIGHLIGHTS ERROR:", date_string, str(e))
         HIGHLIGHTS_CACHE[date_string] = []
+        return []
+
+
+def get_target_highlights(home, away, date_string):
+    """Ask Highlightly directly for this exact finished match.
+
+    The date-wide endpoint can return a subset of highlights. Highlightly also
+    supports filtering highlights by homeTeamName + awayTeamName + date, which
+    is more reliable for matching a specific fixture. Results are cached for
+    the current invocation to avoid duplicate requests.
+    """
+    if not HIGHLIGHTLY_API_KEY or not home or not away or not date_string:
+        return []
+
+    key = (date_string, norm_name(home), norm_name(away))
+    if key in TARGET_HIGHLIGHTS_CACHE:
+        return TARGET_HIGHLIGHTS_CACHE[key]
+
+    try:
+        r = requests.get(
+            f"{HIGHLIGHTLY_URL}/highlights",
+            headers={"x-rapidapi-key": HIGHLIGHTLY_API_KEY, "Accept": "application/json"},
+            params={
+                "date": date_string,
+                "timezone": "Asia/Tashkent",
+                "homeTeamName": home,
+                "awayTeamName": away,
+                "limit": 10,
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        payload = r.json() or {}
+        items = payload.get("data", []) or []
+        TARGET_HIGHLIGHTS_CACHE[key] = items
+        print("HIGHLIGHT DIRECT:", home, "vs", away, len(items))
+        return items
+    except Exception as e:
+        print("HIGHLIGHT DIRECT ERROR:", home, "vs", away, str(e))
+        TARGET_HIGHLIGHTS_CACHE[key] = []
         return []
 
 
@@ -873,14 +914,22 @@ def publish_matches(date_string, title):
         buttons = []
         for league, group_matches_list in page_groups:
             for m in group_matches_list:
-                if status_of(m) != "finished" or not all_highlights:
+                if status_of(m) != "finished" or date_string != yesterday:
                     continue
-                h = highlight_for_match(m, all_highlights)
+
+                home = m.get("teams", {}).get("home", {}).get("name", "?")
+                away = m.get("teams", {}).get("away", {}).get("name", "?")
+
+                # First use the date-wide feed. If it did not contain this
+                # particular match, ask Highlightly directly for the fixture.
+                h = highlight_for_match(m, all_highlights) if all_highlights else None
+                if not h:
+                    direct = get_target_highlights(home, away, date_string)
+                    h = highlight_for_match(m, direct) if direct else None
+
                 if h:
                     url = h.get("url") or h.get("embedUrl")
                     if url and url.startswith(("http://", "https://")):
-                        home = m.get("teams", {}).get("home", {}).get("name", "?")
-                        away = m.get("teams", {}).get("away", {}).get("name", "?")
                         buttons.append([{
                             "text": f"🎥 {home} — {away}",
                             "url": url,
@@ -892,6 +941,7 @@ def publish_matches(date_string, title):
         send_photo(img, caption, reply_markup=reply_markup)
 
     print("HIGHLIGHTS MATCHED:", matched_highlights)
+    print("HIGHLIGHTS DIRECT REQUESTS:", len(TARGET_HIGHLIGHTS_CACHE))
     if not matched_highlights and all_highlights:
         sample = []
         for h in all_highlights[:5]:
