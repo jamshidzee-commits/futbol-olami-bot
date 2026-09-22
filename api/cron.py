@@ -48,6 +48,7 @@ STANDINGS_LEAGUES = [
 ]
 
 logo_cache = {}
+MATCHES_CACHE = {}
 
 
 def F(size, bold=False):
@@ -125,6 +126,10 @@ def current_season(date_obj, calendar_year=False):
 
 
 def get_matches(date_string):
+    if date_string in MATCHES_CACHE:
+        # Return copies so later enrichment does not mutate the cache.
+        return [dict(m) for m in MATCHES_CACHE[date_string]]
+
     fixtures = api_get(
         "fixtures",
         {
@@ -159,42 +164,6 @@ def get_matches(date_string):
 
     return result
 
-
-
-def get_detailed_matches(matches):
-    """Load embedded events for finished matches in batches (max 20 IDs)."""
-    finished = [
-        m for m in matches
-        if status_of(m) == "finished" and m.get("fixture", {}).get("id")
-    ]
-
-    if not finished:
-        return matches
-
-    ids = [str(m["fixture"]["id"]) for m in finished]
-    details = {}
-
-    for start in range(0, len(ids), 20):
-        chunk = ids[start:start + 20]
-        try:
-            response = api_get("fixtures", {"ids": "-".join(chunk)})
-            for item in response:
-                fixture_id = item.get("fixture", {}).get("id")
-                if fixture_id:
-                    details[fixture_id] = item
-        except Exception as e:
-            print("MATCH DETAILS ERROR:", e)
-
-    for m in matches:
-        fixture_id = m.get("fixture", {}).get("id")
-        if fixture_id in details:
-            league_name = m.get("league_name")
-            m.clear()
-            m.update(details[fixture_id])
-            if league_name:
-                m["league_name"] = league_name
-
-    return matches
 
 
 def goal_scorers(m):
@@ -689,9 +658,6 @@ def send_photo(img, caption):
 def publish_matches(date_string, title):
     matches = get_matches(date_string)
 
-    if title == "KECHAGI O‘YINLAR NATIJALARI":
-        matches = get_detailed_matches(matches)
-
     pages = make_match_pages(group_matches(matches))
 
     total = len(pages)
@@ -1143,29 +1109,12 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
 
 
 def league_had_match_yesterday(league_id, date_obj):
-    # Use API-Football only for the date check. Date-based fixture queries
-    # work on the user's current plan and do not request a restricted season.
-    return api_football_had_match_yesterday(league_id, date_obj)
+    date_string = date_obj.strftime("%Y-%m-%d")
+    matches = get_matches(date_string)
 
-
-def api_football_had_match_yesterday(league_id, date_obj):
-    # Date-only fixtures are available on the user's current API-Football
-    # setup even though current-season /standings and season queries are not.
-    fixtures = api_get(
-        "fixtures",
-        {
-            "date": date_obj.strftime("%Y-%m-%d"),
-            "timezone": "Asia/Tashkent",
-        },
-    )
-
-    for m in fixtures:
-        league = m.get("league", {})
-        if league.get("id") != league_id:
-            continue
-        if status_of(m) == "finished":
+    for m in matches:
+        if m.get("league", {}).get("id") == league_id and status_of(m) == "finished":
             return True
-
     return False
 
 
