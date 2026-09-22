@@ -381,6 +381,75 @@ def _team_match_score(a, b):
     return max(seq, overlap * 0.94, contains * 0.96)
 
 
+def _highlight_title_is_clean(text):
+    """Reject obvious meme/reaction/news/preview videos instead of real match recaps."""
+    low = norm_name(text or "")
+    bad = (
+        "funny", "meme", "memes", "prank", "reaction", "reacting",
+        "comedy", "fails", "fail", "troll", "trolling", "parody",
+        "shorts", "short", "prediction", "predictions", "preview",
+        "transfer", "transfers", "news", "podcast", "talk", "analysis",
+        "reaction video", "funny moments", "jokes", "joke", "compilation",
+    )
+    return not any(x in low for x in bad)
+
+
+def _youtube_video_id(url):
+    import re
+    if not url:
+        return None
+    m = re.search(r"(?:youtube\.com/watch\?v=|youtu\.be/)([A-Za-z0-9_-]{6,})", str(url))
+    return m.group(1) if m else None
+
+
+def youtube_video_is_viewable_uzbekistan(video_id):
+    """Check YouTube region restrictions for UZ and embeddability when possible."""
+    if not YOUTUBE_API_KEY or not video_id:
+        return False
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={
+                "part": "contentDetails,status",
+                "id": video_id,
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = (r.json() or {}).get("items", []) or []
+        if not items:
+            return False
+        item = items[0]
+        status = item.get("status") or {}
+        if status.get("embeddable") is False:
+            return False
+        rr = (item.get("contentDetails") or {}).get("regionRestriction") or {}
+        blocked = set(rr.get("blocked") or [])
+        allowed = rr.get("allowed")
+        if "UZ" in blocked:
+            return False
+        if isinstance(allowed, list) and allowed and "UZ" not in allowed:
+            return False
+        return True
+    except Exception as e:
+        print("YOUTUBE GEO CHECK ERROR:", video_id, str(e))
+        # Do not block a result just because the metadata check itself failed.
+        return True
+
+
+def _is_verified_match_highlight(h):
+    category = norm_name(h.get("category", ""))
+    # Highlightly documents VERIFIED as the more trusted source class and
+    # match-highlights as the full match recap category.
+    if str(h.get("type", "")).upper() != "VERIFIED":
+        return False
+    if category != "match highlights" and category != "match-highlights":
+        return False
+    title = h.get("title") or ""
+    return _highlight_title_is_clean(title)
+
+
 def highlight_for_match(m, highlights):
     import re
     from datetime import date as _date
@@ -447,6 +516,9 @@ def highlight_for_match(m, highlights):
         description = h.get("description", "") or ""
         text_blob = f"{title} {description} {h.get('home', '')} {h.get('away', '')}"
 
+        if not _is_verified_match_highlight(h):
+            continue
+
         direct = (
             _team_match_score(home, hh) +
             _team_match_score(away, aa)
@@ -498,7 +570,15 @@ def highlight_for_match(m, highlights):
         return None
 
     candidates.sort(key=lambda x: x[:-1], reverse=True)
-    return candidates[0][-1]
+    for candidate in candidates:
+        h = candidate[-1]
+        url = h.get("url") or h.get("embedUrl") or ""
+        vid = _youtube_video_id(url)
+        if vid and not youtube_video_is_viewable_uzbekistan(vid):
+            print("HIGHLIGHT REJECT GEO:", home, "vs", away, url)
+            continue
+        return h
+    return None
 
 
 
@@ -547,7 +627,10 @@ def youtube_search_highlight(home, away, date_string):
         published_after = f"{start.isoformat()}T00:00:00Z"
         published_before = f"{(start + _timedelta(days=5)).isoformat()}T23:59:59Z"
 
-        query = f"{home} {away} highlights"
+        query = (
+            f'"{home}" "{away}" highlights -reaction -funny -meme -memes '
+            f'-prank -shorts -preview -prediction -transfer -news -podcast'
+        )
         r = requests.get(
             YOUTUBE_API_URL,
             params={
@@ -555,8 +638,11 @@ def youtube_search_highlight(home, away, date_string):
                 "key": YOUTUBE_API_KEY,
                 "q": query,
                 "type": "video",
-                "order": "date",
-                "maxResults": 10,
+                "order": "relevance",
+                "regionCode": "UZ",
+                "videoCategoryId": "17",
+                "videoDuration": "medium",
+                "maxResults": 15,
                 "publishedAfter": published_after,
                 "publishedBefore": published_before,
             },
@@ -581,14 +667,13 @@ def youtube_search_highlight(home, away, date_string):
                 continue
 
             low = norm_name(title)
+            if not _highlight_title_is_clean(title):
+                continue
             keyword_bonus = 0
-            for kw in ("highlight", "highlights", "resumen", "obzor", "обзор", "goals", "extended"):
+            for kw in ("highlight", "highlights", "match highlights", "resumen", "obzor", "обзор", "goals", "extended", "full match"):
                 if kw in low:
                     keyword_bonus += 1
             bad_penalty = 0
-            for kw in ("prediction", "predictions", "preview", "transfer", "news", "reaction"):
-                if kw in low:
-                    bad_penalty += 1
 
             channel = snippet.get("channelTitle") or ""
             channel_blob = norm_name(channel)
@@ -605,14 +690,20 @@ def youtube_search_highlight(home, away, date_string):
             return None
 
         candidates.sort(key=lambda x: x[:-1], reverse=True)
-        best = candidates[0][-1]
-        vid = (best.get("id") or {}).get("videoId")
-        title = (best.get("snippet") or {}).get("title") or ""
-        url = f"https://www.youtube.com/watch?v={vid}" if vid else None
-        result = {"url": url, "title": title}
-        YOUTUBE_CACHE[cache_key] = result
-        print("YOUTUBE FOUND:", home, "vs", away, url, title)
-        return result
+        for candidate in candidates:
+            best = candidate[-1]
+            vid = (best.get("id") or {}).get("videoId")
+            title = (best.get("snippet") or {}).get("title") or ""
+            url = f"https://www.youtube.com/watch?v={vid}" if vid else None
+            if not url or not youtube_video_is_viewable_uzbekistan(vid):
+                continue
+            result = {"url": url, "title": title}
+            YOUTUBE_CACHE[cache_key] = result
+            print("YOUTUBE FOUND:", home, "vs", away, url, title)
+            return result
+        print("YOUTUBE SEARCH: no usable UZ result", home, "vs", away)
+        YOUTUBE_CACHE[cache_key] = None
+        return None
     except Exception as e:
         print("YOUTUBE SEARCH ERROR:", home, "vs", away, str(e))
         YOUTUBE_CACHE[cache_key] = None
@@ -1082,6 +1173,7 @@ def publish_matches(date_string, title):
                 "away": away_obj.get("name") or h.get("away") or h.get("awayTeam") or "",
                 "date": (mm.get("date") or h.get("date") or h.get("matchDate") or "")[:10],
                 "category": h.get("category", ""),
+                "type": h.get("type", ""),
                 "url": h.get("url") or h.get("embedUrl") or "",
             })
         print("HIGHLIGHT SAMPLE:", sample)
