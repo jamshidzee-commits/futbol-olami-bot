@@ -162,44 +162,11 @@ def get_matches(date_string):
         )
     )
 
-    return result
+    MATCHES_CACHE[date_string] = [dict(m) for m in result]
+    return [dict(m) for m in result]
 
 
 
-def goal_scorers(m):
-    """Return readable goal events for a finished fixture."""
-    result = []
-    home_id = m.get("teams", {}).get("home", {}).get("id")
-    away_id = m.get("teams", {}).get("away", {}).get("id")
-
-    for event in m.get("events", []) or []:
-        if event.get("type") != "Goal":
-            continue
-
-        player = event.get("player") or {}
-        name = player.get("name") or "Gol"
-        minute = event.get("time", {}).get("elapsed")
-        extra = event.get("time", {}).get("extra")
-        team_id = (event.get("team") or {}).get("id")
-        detail = (event.get("detail") or "").lower()
-
-        if minute is None:
-            minute_text = "?"
-        elif extra:
-            minute_text = f"{minute}+{extra}"
-        else:
-            minute_text = str(minute)
-
-        tag = ""
-        if "own goal" in detail:
-            tag = " OG"
-        elif "penalty" in detail and "missed" not in detail:
-            tag = " PEN"
-
-        side = "home" if team_id == home_id else "away" if team_id == away_id else ""
-        result.append({"minute": minute_text, "player": name, "tag": tag, "side": side})
-
-    return result
 
 def status_of(m):
     s = (
@@ -267,7 +234,7 @@ def fit_text(d, text, max_width, start=24, minimum=16):
     return t, f
 
 
-def draw_match(img, y, m, show_scorers=False):
+def draw_match(img, y, m):
     d = ImageDraw.Draw(img, "RGBA")
 
     home = m.get("teams", {}).get("home", {})
@@ -276,11 +243,8 @@ def draw_match(img, y, m, show_scorers=False):
     hn, hf = fit_text(d, home.get("name", "?"), 225)
     an, af = fit_text(d, away.get("name", "?"), 260)
 
-    scorers = goal_scorers(m) if show_scorers and status_of(m) == "finished" else []
-    card_height = 116 + min(len(scorers), 7) * 24
-
     d.rounded_rectangle(
-        (45, y, W-45, y+card_height),
+        (45, y, W-45, y+116),
         18,
         fill=(6, 27, 44, 250),
         outline=(38, 120, 165, 220),
@@ -312,16 +276,6 @@ def draw_match(img, y, m, show_scorers=False):
         font=af,
         fill=(248, 251, 255, 255)
     )
-
-    if scorers:
-        scorer_y = y + 94
-        visible = scorers[:7]
-        for idx, scorer in enumerate(visible):
-            line = f"⚽ {scorer['minute']} {scorer['player']}{scorer['tag']}"
-            sf = F(16, True)
-            d.text((70, scorer_y + idx * 24), line, font=sf, fill=(190, 225, 240, 255))
-        if len(scorers) > 7:
-            d.text((760, scorer_y + 6 * 24), f"+{len(scorers)-7} ta gol", font=F(14, True), fill=(130, 195, 220, 255))
 
     state = status_of(m)
 
@@ -376,7 +330,6 @@ def draw_match(img, y, m, show_scorers=False):
         fill=(255, 255, 255, 255)
     )
 
-
 def group_matches(matches):
     groups = []
 
@@ -427,15 +380,8 @@ def make_match_image(
 
     count = sum(len(ms) for _, ms in page_groups)
     leagues = len(page_groups)
-    show_scorers = title == "KECHAGI O‘YINLAR NATIJALARI"
 
-    match_extra = 0
-    if show_scorers:
-        for _, match_list in page_groups:
-            for match in match_list:
-                match_extra += min(len(goal_scorers(match)), 7) * 24
-
-    height = 430 + leagues*100 + count*150 + match_extra + 160
+    height = 430 + leagues*100 + count*150 + 160
 
     img = Image.new(
         "RGBA",
@@ -447,7 +393,6 @@ def make_match_image(
 
     for yy in range(height):
         ratio = yy / max(1, height-1)
-
         d.line(
             (0, yy, W, yy),
             fill=(
@@ -458,7 +403,6 @@ def make_match_image(
             )
         )
 
-    # Header stripes
     for x in range(-250, W+400, 190):
         d.polygon(
             [
@@ -476,146 +420,47 @@ def make_match_image(
         outline=(70, 185, 240, 230),
         width=3
     )
+    d.text((82, 59), "F", font=F(50, True), fill=(255, 255, 255, 255))
+    d.text((185, 55), "FUTBOL OLAMI", font=F(48, True), fill=(245, 250, 255, 255))
+    d.text((188, 112), "Futbol haqida hammasi!", font=F(21), fill=(130, 205, 245, 255))
 
-    d.text(
-        (82, 59),
-        "F",
-        font=F(50, True),
-        fill=(255, 255, 255, 255)
-    )
-
-    d.text(
-        (185, 55),
-        "FUTBOL OLAMI",
-        font=F(48, True),
-        fill=(245, 250, 255, 255)
-    )
-
-    d.text(
-        (188, 112),
-        "Futbol haqida hammasi!",
-        font=F(21),
-        fill=(130, 205, 245, 255)
-    )
-
-    d.rounded_rectangle(
-        (55, 180, 205, 320),
-        20,
-        fill=(245, 249, 252, 255)
-    )
-
-    d.rounded_rectangle(
-        (55, 180, 205, 224),
-        20,
-        fill=(235, 55, 55, 255)
-    )
-
-    d.rectangle(
-        (55, 205, 205, 224),
-        fill=(235, 55, 55, 255)
-    )
+    d.rounded_rectangle((55, 180, 205, 320), 20, fill=(245, 249, 252, 255))
+    d.rounded_rectangle((55, 180, 205, 224), 20, fill=(235, 55, 55, 255))
+    d.rectangle((55, 205, 205, 224), fill=(235, 55, 55, 255))
 
     months = {
         1:"YANVAR", 2:"FEVRAL", 3:"MART", 4:"APREL",
         5:"MAY", 6:"IYUN", 7:"IYUL", 8:"AVGUST",
         9:"SENTABR", 10:"OKTABR", 11:"NOYABR", 12:"DEKABR"
     }
-
     days = {
         0:"DUSHANBA", 1:"SESHANBA", 2:"CHORSHANBA",
         3:"PAYSHANBA", 4:"JUMA", 5:"SHANBA", 6:"YAKSHANBA"
     }
 
-    d.text(
-        (78, 186),
-        months[dt.month],
-        font=F(17, True),
-        fill=(255, 255, 255, 255)
-    )
-
-    d.text(
-        (88, 228),
-        dt.strftime("%d"),
-        font=F(58, True),
-        fill=(8, 25, 40, 255)
-    )
-
-    d.text(
-        (245, 188),
-        title,
-        font=F(33, True),
-        fill=(248, 252, 255, 255)
-    )
-
-    d.text(
-        (248, 245),
-        f"{dt.strftime('%d.%m.%Y')} | {days[dt.weekday()]}",
-        font=F(19),
-        fill=(145, 200, 230, 255)
-    )
+    d.text((78, 186), months[dt.month], font=F(17, True), fill=(255,255,255,255))
+    d.text((88, 228), dt.strftime("%d"), font=F(58, True), fill=(8,25,40,255))
+    d.text((245, 188), title, font=F(33, True), fill=(248,252,255,255))
+    d.text((248, 245), f"{dt.strftime('%d.%m.%Y')} | {days[dt.weekday()]}", font=F(19), fill=(145,200,230,255))
 
     if total_pages > 1:
-        d.rounded_rectangle(
-            (900, 188, 1018, 242),
-            16,
-            fill=(7, 105, 155, 235)
-        )
-
-        d.text(
-            (926, 200),
-            f"{page_no}/{total_pages}",
-            font=F(20, True),
-            fill=(255, 255, 255, 255)
-        )
+        d.rounded_rectangle((900, 188, 1018, 242), 16, fill=(7,105,155,235))
+        d.text((926, 200), f"{page_no}/{total_pages}", font=F(20, True), fill=(255,255,255,255))
 
     y = 355
-
     for league, matches in page_groups:
-        d.rounded_rectangle(
-            (45, y, W-45, y+70),
-            18,
-            fill=(7, 39, 62, 255),
-            outline=(45, 140, 195, 230),
-            width=2
-        )
-
-        d.text(
-            (70, y+20),
-            league,
-            font=F(23, True),
-            fill=(248, 252, 255, 255)
-        )
-
+        d.rounded_rectangle((45, y, W-45, y+70), 18, fill=(7,39,62,255), outline=(45,140,195,230), width=2)
+        d.text((70, y+20), league, font=F(23, True), fill=(248,252,255,255))
         y += 88
-
         for m in matches:
-            scorers_count = len(goal_scorers(m)) if show_scorers else 0
-            draw_match(img, y, m, show_scorers=show_scorers)
-            y += 150 + min(scorers_count, 7) * 24
-
+            draw_match(img, y, m)
+            y += 150
         y += 12
 
     footer_y = height - 145
-
-    d.line(
-        (60, footer_y, W-60, footer_y),
-        fill=(55, 135, 175, 150),
-        width=2
-    )
-
-    d.text(
-        (70, footer_y+25),
-        "Futbol bizni birlashtiradi!",
-        font=F(27, True),
-        fill=(238, 248, 255, 255)
-    )
-
-    d.text(
-        (70, footer_y+72),
-        "Futbol olami  •  Futbol haqida hammasi!",
-        font=F(20),
-        fill=(125, 195, 225, 255)
-    )
+    d.line((60, footer_y, W-60, footer_y), fill=(55,135,175,150), width=2)
+    d.text((70, footer_y+25), "Futbol bizni birlashtiradi!", font=F(27, True), fill=(238,248,255,255))
+    d.text((70, footer_y+72), "Futbol olami  •  Futbol haqida hammasi!", font=F(20), fill=(125,195,225,255))
 
     return img.convert("RGB")
 
@@ -658,8 +503,11 @@ def send_photo(img, caption):
 def publish_matches(date_string, title):
     matches = get_matches(date_string)
 
-    pages = make_match_pages(group_matches(matches))
+    if not matches:
+        print("NO MATCHES:", title, date_string)
+        return
 
+    pages = make_match_pages(group_matches(matches))
     total = len(pages)
 
     for no, page_groups in enumerate(pages, 1):
@@ -681,6 +529,9 @@ def publish_matches(date_string, title):
 
         if total > 1:
             caption += f"\nSahifa: {no}/{total}"
+
+        send_photo(img, caption)
+
 
 # ---------------- STANDINGS ----------------
 #
@@ -1137,16 +988,30 @@ def publish_standing_table(title, season, table):
 
 def publish_standings(date_obj):
     season = date_obj.year if date_obj.month >= 7 else date_obj.year - 1
+    yesterday = date_obj - timedelta(days=1)
+    changed_ids = set()
+
+    try:
+        yesterday_matches = get_matches(yesterday.strftime("%Y-%m-%d"))
+        for m in yesterday_matches:
+            if status_of(m) != "finished":
+                continue
+            lid = m.get("league", {}).get("id")
+            if lid is not None:
+                changed_ids.add(lid)
+        print("STANDINGS MATCH CHECK:", yesterday.strftime("%Y-%m-%d"), "CHANGED IDS:", sorted(changed_ids))
+    except Exception as e:
+        print("STANDINGS MATCH CHECK ERROR:", str(e))
+        print("STANDINGS CHECK COMPLETE, CHECKED: 9 CHANGED: 0")
+        return
+
     checked = 0
     changed = 0
 
-    # All nine leagues use API-Football only to detect whether a completed
-    # match occurred yesterday. The actual table comes from ESPN (or the
-    # Uzbekistan public table) and never calls API-Football /standings.
     for league_id, title in STANDINGS_LEAGUES:
         checked += 1
         try:
-            if not league_had_match_yesterday(league_id, date_obj - timedelta(days=1)):
+            if league_id not in changed_ids:
                 print("STANDINGS NO CHANGE:", title, "no completed match yesterday")
                 continue
 
