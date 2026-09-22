@@ -13,6 +13,7 @@ API_KEY = os.environ.get("FOOTBALL_API_KEY")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 CRON_SECRET = os.environ.get("CRON_SECRET")
 HIGHLIGHTLY_API_KEY = os.environ.get("HIGHLIGHTLY_API_KEY")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 
 API_URL = "https://v3.football.api-sports.io"
 TASHKENT = ZoneInfo("Asia/Tashkent")
