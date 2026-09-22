@@ -56,16 +56,79 @@ STANDINGS_LEAGUES = [
 ]
 
 # Qo‘shimcha kuzatuv: top klublar va O‘zbekiston terma jamoalari.
+# API-Football team IDs are persistent across competitions/seasons.
+# Using IDs prevents false matches such as the Brazilian Juventus when we mean
+# Juventus FC from Italy.
+TOP_TEAM_IDS = {
+    # England
+    50,  # Manchester City
+    40,  # Liverpool
+    42,  # Arsenal
+    33,  # Manchester United
+    49,  # Chelsea
+    47,  # Tottenham Hotspur
+    34,  # Newcastle United
+    # Spain
+    541, # Real Madrid
+    529, # Barcelona
+    530, # Atletico Madrid
+    531, # Athletic Club
+    # Italy
+    505, # Inter
+    489, # AC Milan
+    496, # Juventus
+    492, # Napoli
+    497, # Roma
+    # Germany
+    157, # Bayern Munich
+    165, # Borussia Dortmund
+    168, # Bayer Leverkusen
+    173, # RB Leipzig
+    # France
+    85,  # Paris Saint-Germain
+    81,  # Marseille
+    91,  # Monaco
+    80,  # Lyon
+    79,  # Lille
+    # Portugal
+    211, # Benfica
+    212, # Porto
+    228, # Sporting CP
+    # Netherlands
+    194, # Ajax
+    197, # PSV
+    209, # Feyenoord
+    # Saudi Arabia (2026/27 API-Football IDs)
+    2932, # Al-Hilal Saudi FC
+    2938, # Al-Ittihad FC
+    2929, # Al-Ahli Jeddah
+}
+
+# Exact-name fallback is retained only for clubs for which we have not pinned
+# an ID above.  Once an ID is known for a name, name-only matching is blocked.
 TOP_TEAM_NAMES = {
-    "manchester city", "liverpool", "arsenal", "manchester united", "chelsea",
-    "tottenham", "newcastle united", "real madrid", "barcelona", "atletico madrid",
-    "athletic club", "inter", "internazionale", "ac milan", "milan", "juventus",
-    "napoli", "roma", "bayern munich", "bayern munchen", "borussia dortmund",
-    "bayer leverkusen", "rb leipzig", "paris saint germain", "psg", "marseille",
-    "monaco", "lyon", "lille", "benfica", "porto", "sporting cp", "sporting lisbon",
-    "ajax", "psv eindhoven", "psv", "feyenoord", "al hilal", "al nassr",
-    "al ittihad", "al ahli", "al ain", "al sadd", "urawa red diamonds",
+    "al nassr", "al nasr", "al ain", "al sadd", "urawa red diamonds",
     "kawasaki frontale", "yokohama f marinos",
+}
+
+# Names with a pinned ID must NEVER be accepted by name alone.  This is what
+# prevents e.g. Brazil's Juventus from being mistaken for Juventus FC.
+PINNED_TEAM_NAME_IDS = {
+    "manchester city": 50, "liverpool": 40, "arsenal": 42,
+    "manchester united": 33, "chelsea": 49, "tottenham hotspur": 47,
+    "newcastle united": 34, "real madrid": 541, "barcelona": 529,
+    "atletico madrid": 530, "athletic club": 531, "inter": 505,
+    "internazionale": 505, "ac milan": 489, "milan": 489,
+    "juventus": 496, "napoli": 492, "roma": 497,
+    "bayern munich": 157, "bayern munchen": 157,
+    "borussia dortmund": 165, "bayer leverkusen": 168, "rb leipzig": 173,
+    "paris saint germain": 85, "psg": 85, "marseille": 81,
+    "monaco": 91, "lyon": 80, "lille": 79, "benfica": 211,
+    "porto": 212, "sporting cp": 228, "sporting lisbon": 228,
+    "ajax": 194, "psv eindhoven": 197, "psv": 197, "feyenoord": 209,
+    "al hilal": 2932, "al hilal saudi fc": 2932,
+    "al ittihad": 2938, "al ittihad fc": 2938,
+    "al ahli": 2929, "al ahli jeddah": 2929,
 }
 
 UZBEK_NATIONAL_NAMES = {
@@ -164,24 +227,39 @@ def norm_name(value):
     return " ".join(text.split())
 
 
-def is_tracked_team(name):
+def is_tracked_team(name, team_id=None):
     n = norm_name(name)
-    if n in TOP_TEAM_NAMES or n in UZBEK_NATIONAL_NAMES:
+    try:
+        tid = int(team_id) if team_id is not None else None
+    except (TypeError, ValueError):
+        tid = None
+
+    if tid in TOP_TEAM_IDS:
         return True
 
-    # Common API naming variants.
+    # National teams are intentionally name based because their fixtures are
+    # not part of the club ID list.
+    if n in UZBEK_NATIONAL_NAMES:
+        return True
+
+    # If this normalized name belongs to a pinned club, require the exact ID.
+    pinned = PINNED_TEAM_NAME_IDS.get(n)
+    if pinned is not None:
+        return tid == pinned
+
+    # Common API naming variants for the still-unpinned clubs.
     aliases = {
         "paris sg": "psg",
         "inter milan": "inter",
-        "internazionale": "inter",
-        "sporting": "sporting cp",
-        "psv": "psv",
-        "bayern": "bayern munich",
         "atletico de madrid": "atletico madrid",
+        "sporting": "sporting cp",
+        "bayern": "bayern munich",
     }
-    if n in aliases:
-        return True
-    return False
+    aliased = aliases.get(n)
+    if aliased in PINNED_TEAM_NAME_IDS:
+        return tid == PINNED_TEAM_NAME_IDS[aliased]
+
+    return n in TOP_TEAM_NAMES
 
 
 def is_tracked_match(m):
@@ -195,9 +273,12 @@ def is_tracked_match(m):
         return True
 
     teams = m.get("teams", {})
-    home = teams.get("home", {}).get("name", "")
-    away = teams.get("away", {}).get("name", "")
-    return is_tracked_team(home) or is_tracked_team(away)
+    home = teams.get("home", {}) or {}
+    away = teams.get("away", {}) or {}
+    return (
+        is_tracked_team(home.get("name", ""), home.get("id"))
+        or is_tracked_team(away.get("name", ""), away.get("id"))
+    )
 
 
 def get_highlights(date_string):
@@ -229,44 +310,91 @@ def get_highlights(date_string):
         return []
 
 
+def _team_match_score(a, b):
+    """Score two team names while tolerating common FC/CF/name variants."""
+    import re
+    from difflib import SequenceMatcher
+
+    def clean(value):
+        n = norm_name(value)
+        # Remove common naming noise used differently by feeds.
+        n = re.sub(r"\b(fc|cf|sc|afc|club|football club|de futbol|de futebol)\b", " ", n)
+        n = n.replace("saint germain", "sg")
+        return " ".join(n.split())
+
+    aa = clean(a)
+    bb = clean(b)
+    if not aa or not bb:
+        return 0.0
+    if aa == bb:
+        return 1.0
+
+    at = set(aa.split())
+    bt = set(bb.split())
+    overlap = len(at & bt) / max(1, len(at | bt))
+    seq = SequenceMatcher(None, aa, bb).ratio()
+    contains = 1.0 if aa in bb or bb in aa else 0.0
+    return max(seq, overlap * 0.94, contains * 0.96)
+
+
 def highlight_for_match(m, highlights):
-    home = norm_name(m.get("teams", {}).get("home", {}).get("name", ""))
-    away = norm_name(m.get("teams", {}).get("away", {}).get("name", ""))
+    home = m.get("teams", {}).get("home", {}).get("name", "")
+    away = m.get("teams", {}).get("away", {}).get("name", "")
+    fixture_date = (m.get("fixture", {}).get("date", "") or "")[:10]
     if not home or not away:
         return None
-
-    from difflib import SequenceMatcher
 
     candidates = []
     for h in highlights:
         if h.get("category") not in (None, "match-highlights"):
             continue
+
         match = h.get("match") or {}
-        hh = norm_name((match.get("homeTeam") or {}).get("name", ""))
-        aa = norm_name((match.get("awayTeam") or {}).get("name", ""))
-        if not hh or not aa:
+        hdate = (match.get("date", "") or "")[:10]
+        if fixture_date and hdate and fixture_date != hdate:
             continue
 
-        sim_home = SequenceMatcher(None, home, hh).ratio()
-        sim_away = SequenceMatcher(None, away, aa).ratio()
-        # Allow home/away to match in either orientation because some feeds differ.
-        direct = (sim_home + sim_away) / 2
-        swapped = (SequenceMatcher(None, home, aa).ratio() + SequenceMatcher(None, away, hh).ratio()) / 2
-        score = max(direct, swapped)
+        hh = (match.get("homeTeam") or {}).get("name", "")
+        aa = (match.get("awayTeam") or {}).get("name", "")
 
+        # Some Highlightly records have enough information in the title even
+        # when nested team names are abbreviated.
+        title = h.get("title", "") or ""
+
+        direct = (
+            _team_match_score(home, hh) +
+            _team_match_score(away, aa)
+        ) / 2 if hh and aa else 0.0
+
+        swapped = (
+            _team_match_score(home, aa) +
+            _team_match_score(away, hh)
+        ) / 2 if hh and aa else 0.0
+
+        title_score = (
+            _team_match_score(home, title) +
+            _team_match_score(away, title)
+        ) / 2
+
+        score = max(direct, swapped, title_score * 0.97)
         if score < 0.68:
             continue
 
         verified = 1 if h.get("type") == "VERIFIED" else 0
-        source = norm_name(h.get("source", ""))
         category = 1 if h.get("category") == "match-highlights" else 0
-        candidates.append((verified, category, score, source, h))
+        source = norm_name(h.get("source", ""))
+        channel = norm_name(h.get("channel", ""))
+        # Prefer exact match structure over title-only matches, then verified
+        # and match-highlights, then YouTube/official-style sources.
+        structure_bonus = 1 if direct >= 0.68 or swapped >= 0.68 else 0
+        youtube_bonus = 1 if source == "youtube" or channel == "youtube" else 0
+        candidates.append((structure_bonus, verified, category, score, youtube_bonus, h))
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: (x[0], x[1], x[2], 1 if x[3] == "youtube" else 0), reverse=True)
-    return candidates[0][4]
+    candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]), reverse=True)
+    return candidates[0][5]
 
 
 def get_matches(date_string):
@@ -660,6 +788,8 @@ def publish_matches(date_string, title):
     pages = make_match_pages(group_matches(matches))
     total = len(pages)
 
+    matched_highlights = 0
+
     for no, page_groups in enumerate(pages, 1):
         img = make_match_image(
             title,
@@ -695,10 +825,13 @@ def publish_matches(date_string, title):
                             "text": f"🎥 {home} — {away}",
                             "url": url,
                         }])
+                        matched_highlights += 1
                         print("HIGHLIGHT FOUND:", home, "vs", away, url)
 
         reply_markup = {"inline_keyboard": buttons[:5]} if buttons else None
         send_photo(img, caption, reply_markup=reply_markup)
+
+    print("HIGHLIGHTS MATCHED:", matched_highlights)
 
 
 # ---------------- STANDINGS ----------------
