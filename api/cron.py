@@ -608,81 +608,140 @@ def _youtube_team_score(team, text):
     return max(seq, overlap * 0.95)
 
 
-def youtube_search_highlight(home, away, date_string):
-    """Find a likely YouTube match highlight for a specific finished fixture.
+def youtube_search_highlight(home, away, date_string, home_goals=None, away_goals=None):
+    """Find the most relevant YouTube match highlight for a finished fixture.
 
-    Uses YouTube Data API v3 search. This is only a fallback after Highlightly
-    fails. No YouTube video is downloaded or re-uploaded.
+    Search exact score first, then a generic highlights query. We strongly
+    prioritize titles containing both teams and the actual score, while
+    rejecting stats/analysis/reaction/meme content. No video is downloaded.
     """
     if not YOUTUBE_API_KEY or not home or not away or not date_string:
         return None
 
-    cache_key = (date_string, norm_name(home), norm_name(away))
+    cache_key = (date_string, norm_name(home), norm_name(away), home_goals, away_goals)
     if cache_key in YOUTUBE_CACHE:
         return YOUTUBE_CACHE[cache_key]
 
     try:
         from datetime import date as _date, timedelta as _timedelta
         start = _date.fromisoformat(date_string)
-        published_after = f"{start.isoformat()}T00:00:00Z"
-        published_before = f"{(start + _timedelta(days=5)).isoformat()}T23:59:59Z"
+        # Some uploads appear the next day in UTC/Tashkent. Keep the window
+        # broad enough for post-match uploads, but still tied to this fixture.
+        published_after = f"{(start - _timedelta(days=1)).isoformat()}T00:00:00Z"
+        published_before = f"{(start + _timedelta(days=7)).isoformat()}T23:59:59Z"
 
-        query = (
-            f'"{home}" "{away}" highlights -reaction -funny -meme -memes '
-            f'-prank -shorts -preview -prediction -transfer -news -podcast'
-        )
-        r = requests.get(
-            YOUTUBE_API_URL,
-            params={
-                "part": "snippet",
-                "key": YOUTUBE_API_KEY,
-                "q": query,
-                "type": "video",
-                "order": "relevance",
-                "regionCode": "UZ",
-                "videoCategoryId": "17",
-                "videoDuration": "medium",
-                "maxResults": 15,
-                "publishedAfter": published_after,
-                "publishedBefore": published_before,
-            },
-            timeout=20,
-        )
-        r.raise_for_status()
-        payload = r.json() or {}
-        items = payload.get("items", []) or []
+        score_text = None
+        if isinstance(home_goals, int) and isinstance(away_goals, int):
+            score_text = f"{home_goals}-{away_goals}"
 
+        queries = []
+        if score_text:
+            queries += [
+                f'"{home}" "{away}" "{score_text}" highlights',
+                f'"{home}" "{away}" {score_text} highlights',
+            ]
+        queries += [
+            f'"{home}" "{away}" highlights',
+            f'"{home}" "{away}" match highlights',
+        ]
+
+        seen_ids = set()
         candidates = []
-        for item in items:
-            vid = (item.get("id") or {}).get("videoId")
-            snippet = item.get("snippet") or {}
-            if not vid:
-                continue
-            title = snippet.get("title") or ""
-            description = snippet.get("description") or ""
-            text_blob = f"{title} {description}"
-            hs = _youtube_team_score(home, text_blob)
-            aas = _youtube_team_score(away, text_blob)
-            if hs < 0.62 or aas < 0.62:
-                continue
 
-            low = norm_name(title)
-            if not _highlight_title_is_clean(title):
-                continue
-            keyword_bonus = 0
-            for kw in ("highlight", "highlights", "match highlights", "resumen", "obzor", "обзор", "goals", "extended", "full match"):
-                if kw in low:
-                    keyword_bonus += 1
-            bad_penalty = 0
+        for query in queries:
+            r = requests.get(
+                YOUTUBE_API_URL,
+                params={
+                    "part": "snippet",
+                    "key": YOUTUBE_API_KEY,
+                    "q": query + " -reaction -funny -meme -memes -prank -shorts -preview -prediction -transfer -news -podcast -stats -statistics -analysis",
+                    "type": "video",
+                    "order": "relevance",
+                    "regionCode": "UZ",
+                    "videoCategoryId": "17",
+                    "videoDuration": "medium",
+                    "maxResults": 12,
+                    "publishedAfter": published_after,
+                    "publishedBefore": published_before,
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            items = (r.json() or {}).get("items", []) or []
 
-            channel = snippet.get("channelTitle") or ""
-            channel_blob = norm_name(channel)
-            official_bonus = 0
-            if norm_name(home) in channel_blob or norm_name(away) in channel_blob:
-                official_bonus += 2
+            for item in items:
+                vid = (item.get("id") or {}).get("videoId")
+                if not vid or vid in seen_ids:
+                    continue
+                seen_ids.add(vid)
+                snippet = item.get("snippet") or {}
+                title = snippet.get("title") or ""
+                description = snippet.get("description") or ""
+                text_blob = f"{title} {description}"
 
-            score = (hs + aas) / 2 + keyword_bonus * 0.04 + official_bonus * 0.03 - bad_penalty * 0.10
-            candidates.append((score, keyword_bonus, official_bonus, -bad_penalty, item))
+                if not _highlight_title_is_clean(title):
+                    continue
+
+                hs = _youtube_team_score(home, title)
+                aas = _youtube_team_score(away, title)
+                if hs < 0.82 or aas < 0.82:
+                    # Do not accept a video that merely mentions the match.
+                    hs = _youtube_team_score(home, text_blob)
+                    aas = _youtube_team_score(away, text_blob)
+                    if hs < 0.86 or aas < 0.86:
+                        continue
+
+                low = norm_name(title)
+                title_low = low.replace("–", "-").replace("—", "-")
+
+                # Explicitly reject statistics/lineups/analysis/news-style videos.
+                bad_terms = (
+                    "stats", "statistics", "match stats", "statistic", "lineups",
+                    "lineup", "starting xi", "xg", "possession", "tactics",
+                    "analysis", "preview", "prediction", "reaction", "review",
+                    "news", "podcast", "press conference", "post match interview",
+                )
+                if any(term in title_low for term in bad_terms):
+                    continue
+
+                keyword_bonus = 0
+                for kw in (
+                    "highlights", "highlight", "match highlights", "full highlights",
+                    "extended highlights", "resumen", "обзор", "голы", "goals",
+                ):
+                    if kw in low:
+                        keyword_bonus += 1
+
+                score_bonus = 0
+                if score_text:
+                    score_norm = score_text.replace(" ", "")
+                    # Accept common dash/colon score notations.
+                    if score_norm in title_low.replace(" ", ""):
+                        score_bonus += 4
+                    reverse = f"{away_goals}-{home_goals}" if isinstance(home_goals, int) and isinstance(away_goals, int) else None
+                    # Do not award bonus for reversed result; the teams must still match.
+                    if reverse and reverse in title_low.replace(" ", ""):
+                        score_bonus -= 1
+
+                # Strong bonus for both exact team names occurring in the title.
+                exact_both = 1 if _youtube_team_score(home, title) >= 0.98 and _youtube_team_score(away, title) >= 0.98 else 0
+
+                channel = snippet.get("channelTitle") or ""
+                ch = norm_name(channel)
+                official_bonus = 0
+                for marker in ("laliga", "la liga", "sky sports", "espn", "bein", "beinsports", "uefa", "premier league", "serie a", "bundesliga", "ligue 1"):
+                    if marker in ch:
+                        official_bonus += 2
+
+                # Keep relevance first, then exact-score/title quality.
+                score = (
+                    (hs + aas) / 2
+                    + keyword_bonus * 0.05
+                    + score_bonus * 0.08
+                    + exact_both * 0.06
+                    + official_bonus * 0.02
+                )
+                candidates.append((score, score_bonus, exact_both, keyword_bonus, official_bonus, item))
 
         if not candidates:
             print("YOUTUBE SEARCH:", home, "vs", away, "0")
@@ -693,14 +752,18 @@ def youtube_search_highlight(home, away, date_string):
         for candidate in candidates:
             best = candidate[-1]
             vid = (best.get("id") or {}).get("videoId")
-            title = (best.get("snippet") or {}).get("title") or ""
+            snippet = best.get("snippet") or {}
+            title = snippet.get("title") or ""
             url = f"https://www.youtube.com/watch?v={vid}" if vid else None
-            if not url or not youtube_video_is_viewable_uzbekistan(vid):
+            if not url:
+                continue
+            if not youtube_video_is_viewable_uzbekistan(vid):
                 continue
             result = {"url": url, "title": title}
             YOUTUBE_CACHE[cache_key] = result
             print("YOUTUBE FOUND:", home, "vs", away, url, title)
             return result
+
         print("YOUTUBE SEARCH: no usable UZ result", home, "vs", away)
         YOUTUBE_CACHE[cache_key] = None
         return None
@@ -1143,7 +1206,9 @@ def publish_matches(date_string, title):
                 if h:
                     url = h.get("url") or h.get("embedUrl")
                 else:
-                    yt = youtube_search_highlight(home, away, date_string)
+                    hg = (m.get("goals") or {}).get("home")
+                    ag = (m.get("goals") or {}).get("away")
+                    yt = youtube_search_highlight(home, away, date_string, hg, ag)
                     url = yt.get("url") if yt else None
                     source_label = "YOUTUBE"
 
