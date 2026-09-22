@@ -379,19 +379,29 @@ def highlight_for_match(m, highlights):
 
     candidates = []
     for h in highlights:
+        # Highlightly has returned two shapes in practice:
+        # 1) structured: match.homeTeam / match.awayTeam / match.date
+        # 2) flat: home / away / date
+        # Support both shapes explicitly.
         match = h.get("match") or {}
-        hdate = (match.get("date", "") or "")[:10]
+
+        hdate = (
+            match.get("date")
+            or h.get("date")
+            or h.get("matchDate")
+            or ""
+        )
+        hdate = str(hdate)[:10]
         dd = day_distance(fixture_date, hdate)
-        # Highlightly returns ISO timestamps; depending on timezone conversion
-        # a Tashkent match can appear on the adjacent UTC date. Allow ±1 day.
+        # Highlightly may expose the same match on an adjacent UTC date.
         if dd > 1:
             continue
 
-        hh = team_name(match.get("homeTeam"))
-        aa = team_name(match.get("awayTeam"))
+        hh = team_name(match.get("homeTeam")) or str(h.get("home") or h.get("homeTeam") or "")
+        aa = team_name(match.get("awayTeam")) or str(h.get("away") or h.get("awayTeam") or "")
         title = h.get("title", "") or ""
         description = h.get("description", "") or ""
-        text_blob = f"{title} {description}"
+        text_blob = f"{title} {description} {h.get('home', '')} {h.get('away', '')}"
 
         direct = (
             _team_match_score(home, hh) +
@@ -886,12 +896,15 @@ def publish_matches(date_string, title):
         sample = []
         for h in all_highlights[:5]:
             mm = h.get("match") or {}
+            home_obj = mm.get("homeTeam") or {}
+            away_obj = mm.get("awayTeam") or {}
             sample.append({
                 "title": h.get("title", ""),
-                "home": (mm.get("homeTeam") or {}).get("name", ""),
-                "away": (mm.get("awayTeam") or {}).get("name", ""),
-                "date": (mm.get("date", "") or "")[:10],
+                "home": home_obj.get("name") or h.get("home") or h.get("homeTeam") or "",
+                "away": away_obj.get("name") or h.get("away") or h.get("awayTeam") or "",
+                "date": (mm.get("date") or h.get("date") or h.get("matchDate") or "")[:10],
                 "category": h.get("category", ""),
+                "url": h.get("url") or h.get("embedUrl") or "",
             })
         print("HIGHLIGHT SAMPLE:", sample)
 
