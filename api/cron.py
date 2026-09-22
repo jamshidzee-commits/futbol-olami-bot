@@ -160,6 +160,78 @@ def get_matches(date_string):
     return result
 
 
+
+def get_detailed_matches(matches):
+    """Load embedded events for finished matches in batches (max 20 IDs)."""
+    finished = [
+        m for m in matches
+        if status_of(m) == "finished" and m.get("fixture", {}).get("id")
+    ]
+
+    if not finished:
+        return matches
+
+    ids = [str(m["fixture"]["id"]) for m in finished]
+    details = {}
+
+    for start in range(0, len(ids), 20):
+        chunk = ids[start:start + 20]
+        try:
+            response = api_get("fixtures", {"ids": "-".join(chunk)})
+            for item in response:
+                fixture_id = item.get("fixture", {}).get("id")
+                if fixture_id:
+                    details[fixture_id] = item
+        except Exception as e:
+            print("MATCH DETAILS ERROR:", e)
+
+    for m in matches:
+        fixture_id = m.get("fixture", {}).get("id")
+        if fixture_id in details:
+            league_name = m.get("league_name")
+            m.clear()
+            m.update(details[fixture_id])
+            if league_name:
+                m["league_name"] = league_name
+
+    return matches
+
+
+def goal_scorers(m):
+    """Return readable goal events for a finished fixture."""
+    result = []
+    home_id = m.get("teams", {}).get("home", {}).get("id")
+    away_id = m.get("teams", {}).get("away", {}).get("id")
+
+    for event in m.get("events", []) or []:
+        if event.get("type") != "Goal":
+            continue
+
+        player = event.get("player") or {}
+        name = player.get("name") or "Gol"
+        minute = event.get("time", {}).get("elapsed")
+        extra = event.get("time", {}).get("extra")
+        team_id = (event.get("team") or {}).get("id")
+        detail = (event.get("detail") or "").lower()
+
+        if minute is None:
+            minute_text = "?"
+        elif extra:
+            minute_text = f"{minute}+{extra}"
+        else:
+            minute_text = str(minute)
+
+        tag = ""
+        if "own goal" in detail:
+            tag = " OG"
+        elif "penalty" in detail and "missed" not in detail:
+            tag = " PEN"
+
+        side = "home" if team_id == home_id else "away" if team_id == away_id else ""
+        result.append({"minute": minute_text, "player": name, "tag": tag, "side": side})
+
+    return result
+
 def status_of(m):
     s = (
         m.get("fixture", {})
@@ -226,7 +298,7 @@ def fit_text(d, text, max_width, start=24, minimum=16):
     return t, f
 
 
-def draw_match(img, y, m):
+def draw_match(img, y, m, show_scorers=False):
     d = ImageDraw.Draw(img, "RGBA")
 
     home = m.get("teams", {}).get("home", {})
@@ -235,8 +307,11 @@ def draw_match(img, y, m):
     hn, hf = fit_text(d, home.get("name", "?"), 225)
     an, af = fit_text(d, away.get("name", "?"), 260)
 
+    scorers = goal_scorers(m) if show_scorers and status_of(m) == "finished" else []
+    card_height = 116 + min(len(scorers), 7) * 24
+
     d.rounded_rectangle(
-        (45, y, W-45, y+116),
+        (45, y, W-45, y+card_height),
         18,
         fill=(6, 27, 44, 250),
         outline=(38, 120, 165, 220),
@@ -268,6 +343,16 @@ def draw_match(img, y, m):
         font=af,
         fill=(248, 251, 255, 255)
     )
+
+    if scorers:
+        scorer_y = y + 94
+        visible = scorers[:7]
+        for idx, scorer in enumerate(visible):
+            line = f"⚽ {scorer['minute']} {scorer['player']}{scorer['tag']}"
+            sf = F(16, True)
+            d.text((70, scorer_y + idx * 24), line, font=sf, fill=(190, 225, 240, 255))
+        if len(scorers) > 7:
+            d.text((760, scorer_y + 6 * 24), f"+{len(scorers)-7} ta gol", font=F(14, True), fill=(130, 195, 220, 255))
 
     state = status_of(m)
 
@@ -373,8 +458,15 @@ def make_match_image(
 
     count = sum(len(ms) for _, ms in page_groups)
     leagues = len(page_groups)
+    show_scorers = title == "KECHAGI O‘YINLAR NATIJALARI"
 
-    height = 430 + leagues*100 + count*150 + 160
+    match_extra = 0
+    if show_scorers:
+        for _, match_list in page_groups:
+            for match in match_list:
+                match_extra += min(len(goal_scorers(match)), 7) * 24
+
+    height = 430 + leagues*100 + count*150 + match_extra + 160
 
     img = Image.new(
         "RGBA",
@@ -528,8 +620,9 @@ def make_match_image(
         y += 88
 
         for m in matches:
-            draw_match(img, y, m)
-            y += 150
+            scorers_count = len(goal_scorers(m)) if show_scorers else 0
+            draw_match(img, y, m, show_scorers=show_scorers)
+            y += 150 + min(scorers_count, 7) * 24
 
         y += 12
 
@@ -595,6 +688,10 @@ def send_photo(img, caption):
 
 def publish_matches(date_string, title):
     matches = get_matches(date_string)
+
+    if title == "KECHAGI O‘YINLAR NATIJALARI":
+        matches = get_detailed_matches(matches)
+
     pages = make_match_pages(group_matches(matches))
 
     total = len(pages)
