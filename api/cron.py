@@ -662,18 +662,54 @@ def external_json(url, params=None):
 
 
 def _stat_map(stats):
+    """Normalize ESPN standings stats from both dict and list response shapes."""
     result = {}
+
     if isinstance(stats, list):
         for item in stats:
             if not isinstance(item, dict):
                 continue
-            name = item.get("name") or item.get("abbreviation")
+
+            # ESPN responses can expose the number as `value` or only as
+            # a formatted `displayValue`.  Some versions use abbreviations.
+            names = [
+                item.get("name"),
+                item.get("abbreviation"),
+                item.get("shortDisplayName"),
+            ]
             value = item.get("value")
-            if name is not None:
-                result[str(name).lower()] = value
+            if value is None:
+                value = item.get("displayValue")
+
+            for name in names:
+                if name is not None:
+                    result[str(name).strip().lower()] = value
+
     elif isinstance(stats, dict):
         for k, v in stats.items():
-            result[str(k).lower()] = v
+            result[str(k).strip().lower()] = v
+
+    # Normalize common ESPN abbreviations to the names used below.
+    aliases = {
+        "gp": "gamesplayed",
+        "g": "gamesplayed",
+        "w": "wins",
+        "d": "ties",
+        "t": "ties",
+        "l": "losses",
+        "f": "goalsfor",
+        "gf": "goalsfor",
+        "a": "goalsagainst",
+        "ga": "goalsagainst",
+        "gd": "goaldifferential",
+        "p": "points",
+        "pts": "points",
+    }
+
+    for alias, canonical in aliases.items():
+        if canonical not in result and alias in result:
+            result[canonical] = result[alias]
+
     return result
 
 
