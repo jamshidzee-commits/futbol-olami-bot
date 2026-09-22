@@ -338,28 +338,60 @@ def _team_match_score(a, b):
 
 
 def highlight_for_match(m, highlights):
+    import re
+    from datetime import date as _date
+
     home = m.get("teams", {}).get("home", {}).get("name", "")
     away = m.get("teams", {}).get("away", {}).get("name", "")
     fixture_date = (m.get("fixture", {}).get("date", "") or "")[:10]
     if not home or not away:
         return None
 
+    def team_name(obj):
+        obj = obj or {}
+        return (obj.get("name") or obj.get("displayName") or
+                obj.get("shortName") or obj.get("abbreviation") or "")
+
+    def day_distance(a, b):
+        if not a or not b:
+            return 9
+        try:
+            return abs((_date.fromisoformat(a) - _date.fromisoformat(b)).days)
+        except Exception:
+            return 9
+
+    def title_has_team(team, title):
+        if not team or not title:
+            return False
+        def c(v):
+            v = norm_name(v)
+            v = re.sub(r"\b(fc|cf|sc|afc|club|football club|de futbol|de futebol)\b", " ", v)
+            return " ".join(v.split())
+        tc = c(team)
+        xc = c(title)
+        if not tc or not xc:
+            return False
+        if tc in xc:
+            return True
+        tt = set(tc.split())
+        xt = set(xc.split())
+        return len(tt) >= 1 and tt.issubset(xt)
+
     candidates = []
     for h in highlights:
-        if h.get("category") not in (None, "match-highlights"):
-            continue
-
         match = h.get("match") or {}
         hdate = (match.get("date", "") or "")[:10]
-        if fixture_date and hdate and fixture_date != hdate:
+        dd = day_distance(fixture_date, hdate)
+        # Highlightly returns ISO timestamps; depending on timezone conversion
+        # a Tashkent match can appear on the adjacent UTC date. Allow ±1 day.
+        if dd > 1:
             continue
 
-        hh = (match.get("homeTeam") or {}).get("name", "")
-        aa = (match.get("awayTeam") or {}).get("name", "")
-
-        # Some Highlightly records have enough information in the title even
-        # when nested team names are abbreviated.
+        hh = team_name(match.get("homeTeam"))
+        aa = team_name(match.get("awayTeam"))
         title = h.get("title", "") or ""
+        description = h.get("description", "") or ""
+        text_blob = f"{title} {description}"
 
         direct = (
             _team_match_score(home, hh) +
@@ -372,29 +404,47 @@ def highlight_for_match(m, highlights):
         ) / 2 if hh and aa else 0.0
 
         title_score = (
-            _team_match_score(home, title) +
-            _team_match_score(away, title)
+            _team_match_score(home, text_blob) +
+            _team_match_score(away, text_blob)
         ) / 2
 
-        score = max(direct, swapped, title_score * 0.97)
-        if score < 0.68:
+        title_exact = 1 if title_has_team(home, text_blob) and title_has_team(away, text_blob) else 0
+        score = max(direct, swapped, title_score * 0.985)
+
+        category_name = (h.get("category") or "").strip().lower()
+        # Prefer real match recaps. If the feed has no structured match team
+        # names, a strong title match is still acceptable.
+        if direct >= 0.55 or swapped >= 0.55:
+            minimum = 0.55
+        elif title_exact:
+            minimum = 0.52
+        else:
+            minimum = 0.70
+        if score < minimum:
             continue
 
         verified = 1 if h.get("type") == "VERIFIED" else 0
-        category = 1 if h.get("category") == "match-highlights" else 0
+        category_score = {
+            "match-highlights": 3,
+            "post-match-content": 1,
+            "other": 0,
+            "goal-clip": -1,
+        }.get(category_name, 0)
         source = norm_name(h.get("source", ""))
         channel = norm_name(h.get("channel", ""))
-        # Prefer exact match structure over title-only matches, then verified
-        # and match-highlights, then YouTube/official-style sources.
-        structure_bonus = 1 if direct >= 0.68 or swapped >= 0.68 else 0
+        structure_bonus = 2 if direct >= 0.72 or swapped >= 0.72 else (1 if direct >= 0.55 or swapped >= 0.55 else 0)
+        date_bonus = 2 if dd == 0 else 1
         youtube_bonus = 1 if source == "youtube" or channel == "youtube" else 0
-        candidates.append((structure_bonus, verified, category, score, youtube_bonus, h))
+        candidates.append((
+            structure_bonus, title_exact, date_bonus, category_score,
+            verified, score, youtube_bonus, h
+        ))
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]), reverse=True)
-    return candidates[0][5]
+    candidates.sort(key=lambda x: x[:-1], reverse=True)
+    return candidates[0][-1]
 
 
 def get_matches(date_string):
@@ -832,6 +882,18 @@ def publish_matches(date_string, title):
         send_photo(img, caption, reply_markup=reply_markup)
 
     print("HIGHLIGHTS MATCHED:", matched_highlights)
+    if not matched_highlights and all_highlights:
+        sample = []
+        for h in all_highlights[:5]:
+            mm = h.get("match") or {}
+            sample.append({
+                "title": h.get("title", ""),
+                "home": (mm.get("homeTeam") or {}).get("name", ""),
+                "away": (mm.get("awayTeam") or {}).get("name", ""),
+                "date": (mm.get("date", "") or "")[:10],
+                "category": h.get("category", ""),
+            })
+        print("HIGHLIGHT SAMPLE:", sample)
 
 
 # ---------------- STANDINGS ----------------
