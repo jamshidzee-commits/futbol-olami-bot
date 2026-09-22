@@ -706,12 +706,30 @@ def _find_standing_entries(node):
 
 
 def get_espn_standings(league_code):
-    # Do NOT pass season=2026. ESPN's endpoint already returns the current
-    # season and this avoids season-specific API restrictions.
-    url = f"https://site.api.espn.com/apis/v2/sports/soccer/{league_code}/standings"
-    data = external_json(url)
-    entries = _find_standing_entries(data)
+    # ESPN documents the /apis/v2/ standings endpoint. We try the web API
+    # domain first because some serverless IPs receive 403 from site.api.
+    # No season parameter is sent: the endpoint returns the current table.
+    urls = [
+        f"https://site.web.api.espn.com/apis/v2/sports/soccer/{league_code}/standings",
+        f"https://site.api.espn.com/apis/v2/sports/soccer/{league_code}/standings",
+    ]
 
+    last_error = None
+    data = None
+    for url in urls:
+        try:
+            data = external_json(url)
+            entries = _find_standing_entries(data)
+            if entries:
+                break
+            last_error = Exception("ESPN standings entries not found")
+        except Exception as e:
+            last_error = e
+            continue
+    else:
+        raise last_error or Exception("ESPN standings request failed")
+
+    entries = _find_standing_entries(data)
     if not entries:
         raise Exception("ESPN standings entries not found")
 
@@ -991,21 +1009,10 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
     return img.convert("RGB")
 
 
-def espn_had_match_yesterday(league_code, date_obj):
-    date_string = date_obj.strftime("%Y%m%d")
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard"
-    data = external_json(url, {"dates": date_string})
-    events = data.get("events", []) if isinstance(data, dict) else []
-
-    for event in events:
-        competitions = event.get("competitions") or []
-        for comp in competitions:
-            status = (comp.get("status") or {}).get("type") or {}
-            state = status.get("state")
-            if state == "post":
-                return True
-
-    return False
+def league_had_match_yesterday(league_id, date_obj):
+    # Use API-Football only for the date check. Date-based fixture queries
+    # work on the user's current plan and do not request a restricted season.
+    return api_football_had_match_yesterday(league_id, date_obj)
 
 
 def api_football_had_match_yesterday(league_id, date_obj):
@@ -1051,38 +1058,32 @@ def publish_standings(date_obj):
     checked = 0
     changed = 0
 
-    # Eight leagues: ESPN table + ESPN yesterday-scoreboard check.
-    for title, league_code in ESPN_STANDINGS:
+    # All nine leagues use API-Football only to detect whether a completed
+    # match occurred yesterday. The actual table comes from ESPN (or the
+    # Uzbekistan public table) and never calls API-Football /standings.
+    for league_id, title in STANDINGS_LEAGUES:
         checked += 1
         try:
-            if not espn_had_match_yesterday(league_code, date_obj - timedelta(days=1)):
+            if not league_had_match_yesterday(league_id, date_obj - timedelta(days=1)):
                 print("STANDINGS NO CHANGE:", title, "no completed match yesterday")
                 continue
 
-            table = get_espn_standings(league_code)
-            if not table:
-                raise Exception("empty ESPN standings table")
+            if league_id == 278:
+                table = get_uzbekistan_standings()
+                table_season = date_obj.year
+            else:
+                code = next(code for name, code in ESPN_STANDINGS if name == title)
+                table = get_espn_standings(code)
+                table_season = season
 
-            publish_standing_table(title, season, table)
+            if not table:
+                raise Exception("empty standings table")
+
+            publish_standing_table(title, table_season, table)
             changed += 1
             print("STANDINGS OK:", title, len(table))
         except Exception as e:
             print("STANDINGS ERROR:", title, str(e))
-
-    # Uzbekistan: API-Football date-only check + public current table.
-    checked += 1
-    try:
-        if not api_football_had_match_yesterday(278, date_obj - timedelta(days=1)):
-            print("STANDINGS NO CHANGE: O‘ZBEKISTON — SUPER LIGA no completed match yesterday")
-        else:
-            table = get_uzbekistan_standings()
-            if not table:
-                raise Exception("empty Uzbekistan standings table")
-            publish_standing_table("O‘ZBEKISTON — SUPER LIGA", date_obj.year, table)
-            changed += 1
-            print("STANDINGS OK: O‘ZBEKISTON — SUPER LIGA", len(table))
-    except Exception as e:
-        print("STANDINGS ERROR: O‘ZBEKISTON — SUPER LIGA", str(e))
 
     print("STANDINGS CHECK COMPLETE, CHECKED:", checked, "CHANGED:", changed)
 
