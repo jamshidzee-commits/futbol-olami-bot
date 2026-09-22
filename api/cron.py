@@ -12,6 +12,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 API_KEY = os.environ.get("FOOTBALL_API_KEY")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 CRON_SECRET = os.environ.get("CRON_SECRET")
+HIGHLIGHTLY_API_KEY = os.environ.get("HIGHLIGHTLY_API_KEY")
 
 API_URL = "https://v3.football.api-sports.io"
 TASHKENT = ZoneInfo("Asia/Tashkent")
@@ -29,10 +30,17 @@ LEAGUE_IDS = {
     135: "ITALIYA — SERIYA A",
     78: "GERMANIYA — BUNDESLIGA",
     61: "FRANSIYA — LIGUE 1",
-    2: "CHEMPIONLAR LIGASI",
-    3: "YEVROPA LIGASI",
-    848: "KONFERENSIYALAR LIGASI",
+    94: "PORTUGALIYA — PRIMEIRA LIGA",
+    88: "NIDERLANDIYA — EREDIVISIE",
+    2: "UEFA — CHEMPIONLAR LIGASI",
+    3: "UEFA — YEVROPA LIGASI",
+    848: "UEFA — KONFERENSIYALAR LIGASI",
+    17: "OSIYO — AFC CHAMPIONS LEAGUE ELITE",
+    5: "UEFA — MILLATLAR LIGASI",
+    278: "O‘ZBEKISTON — SUPER LIGA",
+    307: "SAUDIYA ARABIYASI — SAUDI PRO LEAGUE",
 }
+
 
 # Turnir jadvallari uchun.
 STANDINGS_LEAGUES = [
@@ -47,8 +55,29 @@ STANDINGS_LEAGUES = [
     (278, "O‘ZBEKISTON — SUPER LIGA"),
 ]
 
+# Qo‘shimcha kuzatuv: top klublar va O‘zbekiston terma jamoalari.
+TOP_TEAM_NAMES = {
+    "manchester city", "liverpool", "arsenal", "manchester united", "chelsea",
+    "tottenham", "newcastle united", "real madrid", "barcelona", "atletico madrid",
+    "athletic club", "inter", "internazionale", "ac milan", "milan", "juventus",
+    "napoli", "roma", "bayern munich", "bayern munchen", "borussia dortmund",
+    "bayer leverkusen", "rb leipzig", "paris saint germain", "psg", "marseille",
+    "monaco", "lyon", "lille", "benfica", "porto", "sporting cp", "sporting lisbon",
+    "ajax", "psv eindhoven", "psv", "feyenoord", "al hilal", "al nassr",
+    "al ittihad", "al ahli", "al ain", "al sadd", "urawa red diamonds",
+    "kawasaki frontale", "yokohama f marinos",
+}
+
+UZBEK_NATIONAL_NAMES = {
+    "uzbekistan", "uzbekistan u23", "uzbekistan u20", "uzbekistan u19",
+    "uzbekistan u17", "uzbekistan olympic",
+}
+
+HIGHLIGHTLY_URL = "https://soccer.highlightly.net"
+
 logo_cache = {}
 MATCHES_CACHE = {}
+HIGHLIGHTS_CACHE = {}
 
 
 def F(size, bold=False):
@@ -125,6 +154,121 @@ def current_season(date_obj, calendar_year=False):
     return date_obj.year if date_obj.month >= 7 else date_obj.year - 1
 
 
+def norm_name(value):
+    import unicodedata
+    text = unicodedata.normalize("NFKD", value or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower().replace("’", "'").replace("-", " ")
+    for ch in ".,()[]{}_/\\\"'":
+        text = text.replace(ch, " ")
+    return " ".join(text.split())
+
+
+def is_tracked_team(name):
+    n = norm_name(name)
+    if n in TOP_TEAM_NAMES or n in UZBEK_NATIONAL_NAMES:
+        return True
+
+    # Common API naming variants.
+    aliases = {
+        "paris sg": "psg",
+        "inter milan": "inter",
+        "internazionale": "inter",
+        "sporting": "sporting cp",
+        "psv": "psv",
+        "bayern": "bayern munich",
+        "atletico de madrid": "atletico madrid",
+    }
+    if n in aliases:
+        return True
+    return False
+
+
+def is_tracked_match(m):
+    league = m.get("league", {})
+    lid = league.get("id")
+    if lid in LEAGUE_IDS:
+        return True
+
+    # Preserve all Uzbekistan domestic competitions, including Pro League A.
+    if league.get("country") == "Uzbekistan":
+        return True
+
+    teams = m.get("teams", {})
+    home = teams.get("home", {}).get("name", "")
+    away = teams.get("away", {}).get("name", "")
+    return is_tracked_team(home) or is_tracked_team(away)
+
+
+def get_highlights(date_string):
+    if not HIGHLIGHTLY_API_KEY:
+        return []
+    if date_string in HIGHLIGHTS_CACHE:
+        return HIGHLIGHTS_CACHE[date_string]
+
+    try:
+        r = requests.get(
+            f"{HIGHLIGHTLY_URL}/highlights",
+            headers={"x-rapidapi-key": HIGHLIGHTLY_API_KEY, "Accept": "application/json"},
+            params={
+                "date": date_string,
+                "timezone": "Asia/Tashkent",
+                "limit": 40,
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        payload = r.json() or {}
+        items = payload.get("data", []) or []
+        HIGHLIGHTS_CACHE[date_string] = items
+        print("HIGHLIGHTS OK:", date_string, len(items))
+        return items
+    except Exception as e:
+        print("HIGHLIGHTS ERROR:", date_string, str(e))
+        HIGHLIGHTS_CACHE[date_string] = []
+        return []
+
+
+def highlight_for_match(m, highlights):
+    home = norm_name(m.get("teams", {}).get("home", {}).get("name", ""))
+    away = norm_name(m.get("teams", {}).get("away", {}).get("name", ""))
+    if not home or not away:
+        return None
+
+    from difflib import SequenceMatcher
+
+    candidates = []
+    for h in highlights:
+        if h.get("category") not in (None, "match-highlights"):
+            continue
+        match = h.get("match") or {}
+        hh = norm_name((match.get("homeTeam") or {}).get("name", ""))
+        aa = norm_name((match.get("awayTeam") or {}).get("name", ""))
+        if not hh or not aa:
+            continue
+
+        sim_home = SequenceMatcher(None, home, hh).ratio()
+        sim_away = SequenceMatcher(None, away, aa).ratio()
+        # Allow home/away to match in either orientation because some feeds differ.
+        direct = (sim_home + sim_away) / 2
+        swapped = (SequenceMatcher(None, home, aa).ratio() + SequenceMatcher(None, away, hh).ratio()) / 2
+        score = max(direct, swapped)
+
+        if score < 0.68:
+            continue
+
+        verified = 1 if h.get("type") == "VERIFIED" else 0
+        source = norm_name(h.get("source", ""))
+        category = 1 if h.get("category") == "match-highlights" else 0
+        candidates.append((verified, category, score, source, h))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1], x[2], 1 if x[3] == "youtube" else 0), reverse=True)
+    return candidates[0][4]
+
+
 def get_matches(date_string):
     if date_string in MATCHES_CACHE:
         # Return copies so later enrichment does not mutate the cache.
@@ -144,15 +288,16 @@ def get_matches(date_string):
         league = m.get("league", {})
         lid = league.get("id")
 
-        if lid in LEAGUE_IDS:
-            m["league_name"] = LEAGUE_IDS[lid]
-            result.append(m)
-
-        elif league.get("country") == "Uzbekistan":
-            m["league_name"] = (
-                "O‘ZBEKISTON — " +
-                league.get("name", "FUTBOL").upper()
-            )
+        if is_tracked_match(m):
+            if lid in LEAGUE_IDS:
+                m["league_name"] = LEAGUE_IDS[lid]
+            elif league.get("country") == "Uzbekistan":
+                m["league_name"] = (
+                    "O‘ZBEKISTON — " +
+                    league.get("name", "FUTBOL").upper()
+                )
+            else:
+                m["league_name"] = league.get("name", "FUTBOL").upper()
             result.append(m)
 
     result.sort(
@@ -465,7 +610,7 @@ def make_match_image(
     return img.convert("RGB")
 
 
-def send_photo(img, caption):
+def send_photo(img, caption, reply_markup=None):
     buf = BytesIO()
 
     img.save(
@@ -482,7 +627,8 @@ def send_photo(img, caption):
         data={
             "chat_id": CHANNEL_ID,
             "caption": caption,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            **({"reply_markup": json.dumps(reply_markup, ensure_ascii=False)} if reply_markup else {}),
         },
         files={
             "photo": (
@@ -507,6 +653,10 @@ def publish_matches(date_string, title):
         print("NO MATCHES:", title, date_string)
         return
 
+    # Highlights are attached only to yesterday's finished-game post.
+    yesterday = (datetime.now(TASHKENT).date() - timedelta(days=1)).strftime("%Y-%m-%d")
+    all_highlights = get_highlights(date_string) if date_string == yesterday else []
+
     pages = make_match_pages(group_matches(matches))
     total = len(pages)
 
@@ -530,7 +680,25 @@ def publish_matches(date_string, title):
         if total > 1:
             caption += f"\nSahifa: {no}/{total}"
 
-        send_photo(img, caption)
+        buttons = []
+        for league, group_matches_list in page_groups:
+            for m in group_matches_list:
+                if status_of(m) != "finished" or not all_highlights:
+                    continue
+                h = highlight_for_match(m, all_highlights)
+                if h:
+                    url = h.get("url") or h.get("embedUrl")
+                    if url and url.startswith(("http://", "https://")):
+                        home = m.get("teams", {}).get("home", {}).get("name", "?")
+                        away = m.get("teams", {}).get("away", {}).get("name", "?")
+                        buttons.append([{
+                            "text": f"🎥 {home} — {away}",
+                            "url": url,
+                        }])
+                        print("HIGHLIGHT FOUND:", home, "vs", away, url)
+
+        reply_markup = {"inline_keyboard": buttons[:5]} if buttons else None
+        send_photo(img, caption, reply_markup=reply_markup)
 
 
 # ---------------- STANDINGS ----------------
