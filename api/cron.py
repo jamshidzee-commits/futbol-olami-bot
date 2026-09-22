@@ -620,157 +620,264 @@ def publish_matches(date_string, title):
             caption += f"\nSahifa: {no}/{total}"
 
 # ---------------- STANDINGS ----------------
+#
+# IMPORTANT:
+# API-Football Free plan blocks current-season standings/season queries.
+# Therefore standings are NOT requested from API-Football.
+#
+# 8 leagues use ESPN's public standings endpoint (no API key required).
+# Uzbekistan Super League uses the public soccerassociation.com table.
+#
+# To publish only when a table actually changed, we do not need persistent
+# storage: at the daily 08:00 Tashkent run we check whether that league had
+# a completed match yesterday. If it did, its current table is published.
+# If it did not, nothing is published for that league.
 
-# API-Football Free plan blocks the /standings endpoint for the current
-# season.  We therefore build the table ourselves from completed fixtures.
-# This also gives us exactly the columns we want: I, V, N, P, G, O.
-
-STANDINGS_LEAGUES = [
-    (39, "ANGLIYA — PREMIER LIGA"),
-    (140, "ISPANIYA — LA LIGA"),
-    (135, "ITALIYA — SERIYA A"),
-    (78, "GERMANIYA — BUNDESLIGA"),
-    (61, "FRANSIYA — LIGUE 1"),
-    (307, "SAUDIYA ARABIYASI — SAUDI PRO LEAGUE"),
-    (94, "PORTUGALIYA — PRIMEIRA LIGA"),
-    (88, "NIDERLANDIYA — EREDIVISIE"),
-    (278, "O‘ZBEKISTON — SUPER LIGA"),
+ESPN_STANDINGS = [
+    ("ANGLIYA — PREMIER LIGA", "eng.1"),
+    ("ISPANIYA — LA LIGA", "esp.1"),
+    ("ITALIYA — SERIYA A", "ita.1"),
+    ("GERMANIYA — BUNDESLIGA", "ger.1"),
+    ("FRANSIYA — LIGUE 1", "fra.1"),
+    ("SAUDIYA ARABIYASI — SAUDI PRO LEAGUE", "ksa.1"),
+    ("PORTUGALIYA — PRIMEIRA LIGA", "por.1"),
+    ("NIDERLANDIYA — EREDIVISIE", "ned.1"),
 ]
 
-FINISHED_STATUSES = {"FT", "AET", "PEN"}
+UZ_STANDINGS_URL = "https://www.soccerassociation.com/127/"
 
 
-def _fixture_is_finished(fixture):
-    status = ((fixture.get("fixture") or {}).get("status") or {}).get("short")
-    return status in FINISHED_STATUSES
+def external_json(url, params=None):
+    r = requests.get(
+        url,
+        params=params or {},
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 Futbol-Olami-Bot/1.0",
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
 
 
-def _season_for_league(date_obj):
-    # European/Saudi/Portugal/Netherlands seasons span two calendar years.
-    # Uzbekistan Super League uses the calendar year.
-    return date_obj.year
+def _stat_map(stats):
+    result = {}
+    if isinstance(stats, list):
+        for item in stats:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("abbreviation")
+            value = item.get("value")
+            if name is not None:
+                result[str(name).lower()] = value
+    elif isinstance(stats, dict):
+        for k, v in stats.items():
+            result[str(k).lower()] = v
+    return result
 
 
-def get_league_fixtures(league_id, season, date_obj=None):
-    params = {
-        "league": league_id,
-        "season": season,
-        "timezone": "Asia/Tashkent",
-    }
-    if date_obj is not None:
-        params["date"] = date_obj.strftime("%Y-%m-%d")
-
-    return api_get("fixtures", params)
+def _num(value, default=0):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
 
 
-def build_table_from_fixtures(fixtures):
-    teams = {}
+def _find_standing_entries(node):
+    if isinstance(node, dict):
+        entries = node.get("entries")
+        if isinstance(entries, list) and entries:
+            if any(
+                isinstance(x, dict) and ("team" in x or "stats" in x)
+                for x in entries
+            ):
+                return entries
+        for value in node.values():
+            found = _find_standing_entries(value)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _find_standing_entries(value)
+            if found:
+                return found
+    return None
 
-    for fx in fixtures:
-        if not _fixture_is_finished(fx):
-            continue
 
-        teams_data = fx.get("teams") or {}
-        goals = fx.get("goals") or {}
-        home = teams_data.get("home") or {}
-        away = teams_data.get("away") or {}
-        home_goals = goals.get("home")
-        away_goals = goals.get("away")
+def get_espn_standings(league_code):
+    # Do NOT pass season=2026. ESPN's endpoint already returns the current
+    # season and this avoids season-specific API restrictions.
+    url = f"https://site.api.espn.com/apis/v2/sports/soccer/{league_code}/standings"
+    data = external_json(url)
+    entries = _find_standing_entries(data)
 
-        if not home.get("id") or not away.get("id"):
-            continue
-        if home_goals is None or away_goals is None:
-            continue
-
-        def ensure_team(team):
-            tid = team["id"]
-            if tid not in teams:
-                teams[tid] = {
-                    "id": tid,
-                    "name": team.get("name") or "?",
-                    "logo": team.get("logo"),
-                    "played": 0,
-                    "win": 0,
-                    "draw": 0,
-                    "lose": 0,
-                    "gf": 0,
-                    "ga": 0,
-                    "points": 0,
-                }
-            elif not teams[tid].get("logo") and team.get("logo"):
-                teams[tid]["logo"] = team.get("logo")
-            return teams[tid]
-
-        h = ensure_team(home)
-        a = ensure_team(away)
-
-        hg = int(home_goals)
-        ag = int(away_goals)
-
-        h["played"] += 1
-        a["played"] += 1
-        h["gf"] += hg
-        h["ga"] += ag
-        a["gf"] += ag
-        a["ga"] += hg
-
-        if hg > ag:
-            h["win"] += 1
-            a["lose"] += 1
-            h["points"] += 3
-        elif hg < ag:
-            a["win"] += 1
-            h["lose"] += 1
-            a["points"] += 3
-        else:
-            h["draw"] += 1
-            a["draw"] += 1
-            h["points"] += 1
-            a["points"] += 1
+    if not entries:
+        raise Exception("ESPN standings entries not found")
 
     table = []
-    for row in teams.values():
+
+    for i, entry in enumerate(entries, 1):
+        team = entry.get("team", {}) or {}
+        stats = _stat_map(entry.get("stats", []))
+
+        played = _num(stats.get("gamesplayed", stats.get("gp", stats.get("played", 0))))
+        wins = _num(stats.get("wins", stats.get("w", 0)))
+        draws = _num(stats.get("ties", stats.get("draws", stats.get("d", 0))))
+        losses = _num(stats.get("losses", stats.get("l", 0)))
+        gf = _num(stats.get("goalsfor", stats.get("gf", 0)))
+        ga = _num(stats.get("goalsagainst", stats.get("ga", 0)))
+        gd = _num(stats.get("goaldifferential", stats.get("gd", gf - ga)), gf - ga)
+        points = _num(stats.get("points", stats.get("pts", 0)))
+
+        logos = team.get("logos") or []
+        logo = None
+        if logos and isinstance(logos[0], dict):
+            logo = logos[0].get("href")
+
         table.append({
-            "rank": 0,
-            "team": {"name": row["name"], "logo": row["logo"]},
-            "all": {
-                "played": row["played"],
-                "win": row["win"],
-                "draw": row["draw"],
-                "lose": row["lose"],
-                "goals": {"for": row["gf"], "against": row["ga"]},
+            "rank": i,
+            "team": {
+                "name": team.get("displayName") or team.get("name") or "?",
+                "logo": logo,
             },
-            "goalsDiff": row["gf"] - row["ga"],
-            "points": row["points"],
+            "all": {
+                "played": played,
+                "win": wins,
+                "draw": draws,
+                "lose": losses,
+                "goals": {"for": gf, "against": ga},
+            },
+            "goalsDiff": gd,
+            "points": points,
         })
 
-    # Standard football ordering. Goal difference is used only for sorting;
-    # it is deliberately NOT displayed in the image.
+    # Preserve normal football sorting. The displayed table does not show GD.
     table.sort(key=lambda r: (
         -r["points"],
         -r["goalsDiff"],
         -r["all"]["goals"]["for"],
-        r["team"]["name"].lower(),
+        r["team"]["name"],
     ))
-
     for rank, row in enumerate(table, 1):
         row["rank"] = rank
 
     return table
 
 
-def league_had_results_yesterday(league_id, date_obj):
-    fixtures = get_league_fixtures(league_id, _season_for_league(date_obj), date_obj)
-    return any(_fixture_is_finished(fx) for fx in fixtures)
+class SimpleTableParser:
+    """Small stdlib-only HTML table parser for the Uzbekistan source."""
+    class Parser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = False
+            self.in_tr = False
+            self.in_cell = False
+            self.rows = []
+            self.current = []
+            self.text = []
+            self.cell_tag = None
+
+        def handle_starttag(self, tag, attrs):
+            tag = tag.lower()
+            if tag == "table":
+                self.in_table = True
+            elif self.in_table and tag == "tr":
+                self.in_tr = True
+                self.current = []
+            elif self.in_tr and tag in ("td", "th"):
+                self.in_cell = True
+                self.cell_tag = tag
+                self.text = []
+
+        def handle_data(self, data):
+            if self.in_cell:
+                self.text.append(data)
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if self.in_cell and tag == self.cell_tag:
+                value = " ".join("".join(self.text).split())
+                self.current.append(value)
+                self.text = []
+                self.in_cell = False
+                self.cell_tag = None
+            elif self.in_tr and tag == "tr":
+                if self.current:
+                    self.rows.append(self.current)
+                self.current = []
+                self.in_tr = False
+            elif self.in_table and tag == "table":
+                self.in_table = False
 
 
-def get_current_league_table(league_id, date_obj):
-    season = _season_for_league(date_obj)
-    fixtures = get_league_fixtures(league_id, season)
-    table = build_table_from_fixtures(fixtures)
+def get_uzbekistan_standings():
+    r = requests.get(
+        UZ_STANDINGS_URL,
+        headers={"User-Agent": "Mozilla/5.0 Futbol-Olami-Bot/1.0"},
+        timeout=30,
+    )
+    r.raise_for_status()
+
+    parser = SimpleTableParser.Parser()
+    parser.feed(r.text)
+
+    # Find a table containing Team and points. Different page versions may
+    # use slightly different header labels.
+    chosen = None
+    for idx, row in enumerate(parser.rows):
+        low = [x.lower() for x in row]
+        if "team" in low and any(x in low for x in ("pts", "points", "p")):
+            chosen = parser.rows[idx + 1:]
+            break
+
+    if not chosen:
+        raise Exception("Uzbekistan standings table not found")
+
+    table = []
+    for row in chosen:
+        if len(row) < 2:
+            continue
+
+        # Expected full table:
+        # No, Team, Played, W, D, L, GF, GA, GD, Pts
+        try:
+            rank = int(row[0].strip())
+        except Exception:
+            continue
+
+        def ri(i):
+            return _num(row[i]) if i < len(row) else 0
+
+        team_name = row[1].strip()
+        played = ri(2)
+        wins = ri(3)
+        draws = ri(4)
+        losses = ri(5)
+        gf = ri(6)
+        ga = ri(7)
+        gd = ri(8) if len(row) > 8 else gf - ga
+        points = ri(9) if len(row) > 9 else 0
+
+        table.append({
+            "rank": rank,
+            "team": {"name": team_name, "logo": None},
+            "all": {
+                "played": played,
+                "win": wins,
+                "draw": draws,
+                "lose": losses,
+                "goals": {"for": gf, "against": ga},
+            },
+            "goalsDiff": gd,
+            "points": points,
+        })
+
     if not table:
-        raise Exception("No completed fixtures found for current season")
-    return season, table
+        raise Exception("Uzbekistan standings rows not found")
+
+    table.sort(key=lambda r: r["rank"])
+    return table
 
 
 def draw_standing_row(img, y, row):
@@ -788,7 +895,6 @@ def draw_standing_row(img, y, row):
     goals = row.get("all", {}).get("goals", {})
     gf = goals.get("for", 0)
     ga = goals.get("against", 0)
-    gd = row.get("goalsDiff", gf - ga)
     points = row.get("points", 0)
 
     fill = (7, 31, 49, 255) if int(rank or 0) % 2 else (8, 37, 57, 255)
@@ -800,17 +906,15 @@ def draw_standing_row(img, y, row):
         14,
         fill=fill,
         outline=(34, 105, 145, 180),
-        width=1
+        width=1,
     )
 
     d.text((68, y+27), str(rank), font=F(25, True), fill=(245, 250, 255, 255))
-
     draw_logo(img, team.get("logo"), 145, y+46, 58)
 
     team_text, team_font = fit_text(d, name, 330, start=24, minimum=17)
     d.text((190, y+30), team_text, font=team_font, fill=(248, 252, 255, 255))
 
-    # I V N P G O
     values = [
         (555, str(played)),
         (635, str(wins)),
@@ -826,7 +930,7 @@ def draw_standing_row(img, y, row):
             (x-(box[2]-box[0])/2, y+33),
             value,
             font=F(21, True),
-            fill=(235, 246, 252, 255)
+            fill=(235, 246, 252, 255),
         )
 
 
@@ -841,13 +945,13 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
         ratio = yy / max(1, height-1)
         d.line(
             (0, yy, W, yy),
-            fill=(int(5+3*ratio), int(17+10*ratio), int(30+18*ratio), 255)
+            fill=(int(5+3*ratio), int(17+10*ratio), int(30+18*ratio), 255),
         )
 
     for x in range(-250, W+400, 190):
         d.polygon(
             [(x, 0), (x+65, 0), (x-170, 220), (x-235, 220)],
-            fill=(25, 125, 190, 30)
+            fill=(25, 125, 190, 30),
         )
 
     d.ellipse((55, 40, 155, 140), fill=(10, 72, 112, 110), outline=(70, 185, 240, 230), width=3)
@@ -887,26 +991,42 @@ def make_standings_image(title, season, table, page_no=1, total_pages=1):
     return img.convert("RGB")
 
 
-def publish_standings(date_obj):
-    changed = 0
+def espn_had_match_yesterday(league_code, date_obj):
+    date_string = date_obj.strftime("%Y%m%d")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard"
+    data = external_json(url, {"dates": date_string})
+    events = data.get("events", []) if isinstance(data, dict) else []
 
-    for league_id, title in STANDINGS_LEAGUES:
-        try:
-            # A completed match changes at least I/G and therefore the table.
-            # We use yesterday's results as the change detector, so no state
-            # file/database is needed and this works reliably on Vercel.
-            if not league_had_results_yesterday(league_id, date_obj - timedelta(days=1)):
-                print("STANDINGS NO CHANGE:", title)
-                continue
+    for event in events:
+        competitions = event.get("competitions") or []
+        for comp in competitions:
+            status = (comp.get("status") or {}).get("type") or {}
+            state = status.get("state")
+            if state == "post":
+                return True
 
-            season, table = get_current_league_table(league_id, date_obj)
-            publish_standing_table(title, season, table)
-            changed += 1
-            print("STANDINGS OK:", title, len(table))
-        except Exception as e:
-            print("STANDINGS ERROR:", title, str(e))
+    return False
 
-    print("STANDINGS CHECK COMPLETE, CHANGED:", changed)
+
+def api_football_had_match_yesterday(league_id, date_obj):
+    # Date-only fixtures are available on the user's current API-Football
+    # setup even though current-season /standings and season queries are not.
+    fixtures = api_get(
+        "fixtures",
+        {
+            "date": date_obj.strftime("%Y-%m-%d"),
+            "timezone": "Asia/Tashkent",
+        },
+    )
+
+    for m in fixtures:
+        league = m.get("league", {})
+        if league.get("id") != league_id:
+            continue
+        if status_of(m) == "finished":
+            return True
+
+    return False
 
 
 def publish_standing_table(title, season, table):
@@ -924,6 +1044,47 @@ def publish_standing_table(title, season, table):
         if total > 1:
             caption += f"\nSahifa: {page_no}/{total}"
         send_photo(img, caption)
+
+
+def publish_standings(date_obj):
+    season = date_obj.year if date_obj.month >= 7 else date_obj.year - 1
+    checked = 0
+    changed = 0
+
+    # Eight leagues: ESPN table + ESPN yesterday-scoreboard check.
+    for title, league_code in ESPN_STANDINGS:
+        checked += 1
+        try:
+            if not espn_had_match_yesterday(league_code, date_obj - timedelta(days=1)):
+                print("STANDINGS NO CHANGE:", title, "no completed match yesterday")
+                continue
+
+            table = get_espn_standings(league_code)
+            if not table:
+                raise Exception("empty ESPN standings table")
+
+            publish_standing_table(title, season, table)
+            changed += 1
+            print("STANDINGS OK:", title, len(table))
+        except Exception as e:
+            print("STANDINGS ERROR:", title, str(e))
+
+    # Uzbekistan: API-Football date-only check + public current table.
+    checked += 1
+    try:
+        if not api_football_had_match_yesterday(278, date_obj - timedelta(days=1)):
+            print("STANDINGS NO CHANGE: O‘ZBEKISTON — SUPER LIGA no completed match yesterday")
+        else:
+            table = get_uzbekistan_standings()
+            if not table:
+                raise Exception("empty Uzbekistan standings table")
+            publish_standing_table("O‘ZBEKISTON — SUPER LIGA", date_obj.year, table)
+            changed += 1
+            print("STANDINGS OK: O‘ZBEKISTON — SUPER LIGA", len(table))
+    except Exception as e:
+        print("STANDINGS ERROR: O‘ZBEKISTON — SUPER LIGA", str(e))
+
+    print("STANDINGS CHECK COMPLETE, CHECKED:", checked, "CHANGED:", changed)
 
 
 def run_bot():
