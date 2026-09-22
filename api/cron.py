@@ -137,11 +137,13 @@ UZBEK_NATIONAL_NAMES = {
 }
 
 HIGHLIGHTLY_URL = "https://soccer.highlightly.net"
+YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search"
 
 logo_cache = {}
 MATCHES_CACHE = {}
 HIGHLIGHTS_CACHE = {}
 TARGET_HIGHLIGHTS_CACHE = {}
+YOUTUBE_CACHE = {}
 
 
 def F(size, bold=False):
@@ -496,6 +498,124 @@ def highlight_for_match(m, highlights):
 
     candidates.sort(key=lambda x: x[:-1], reverse=True)
     return candidates[0][-1]
+
+
+
+def _youtube_team_score(team, text):
+    """Return a tolerant team-name score for a YouTube title/description."""
+    import re
+    from difflib import SequenceMatcher
+
+    def clean(value):
+        n = norm_name(value)
+        n = re.sub(r"\b(fc|cf|sc|afc|club|football club|de futbol|de futebol|fk|sk)\b", " ", n)
+        n = re.sub(r"\b(vs|v|versus)\b", " ", n)
+        return " ".join(n.split())
+
+    a = clean(team)
+    b = clean(text)
+    if not a or not b:
+        return 0.0
+    if a in b:
+        return 1.0
+    at = set(a.split())
+    bt = set(b.split())
+    if at and at.issubset(bt):
+        return 1.0
+    overlap = len(at & bt) / max(1, len(at))
+    seq = SequenceMatcher(None, a, b).ratio()
+    return max(seq, overlap * 0.95)
+
+
+def youtube_search_highlight(home, away, date_string):
+    """Find a likely YouTube match highlight for a specific finished fixture.
+
+    Uses YouTube Data API v3 search. This is only a fallback after Highlightly
+    fails. No YouTube video is downloaded or re-uploaded.
+    """
+    if not YOUTUBE_API_KEY or not home or not away or not date_string:
+        return None
+
+    cache_key = (date_string, norm_name(home), norm_name(away))
+    if cache_key in YOUTUBE_CACHE:
+        return YOUTUBE_CACHE[cache_key]
+
+    try:
+        from datetime import date as _date, timedelta as _timedelta
+        start = _date.fromisoformat(date_string)
+        published_after = f"{start.isoformat()}T00:00:00Z"
+        published_before = f"{(start + _timedelta(days=5)).isoformat()}T23:59:59Z"
+
+        query = f"{home} {away} highlights"
+        r = requests.get(
+            YOUTUBE_API_URL,
+            params={
+                "part": "snippet",
+                "key": YOUTUBE_API_KEY,
+                "q": query,
+                "type": "video",
+                "order": "date",
+                "maxResults": 10,
+                "publishedAfter": published_after,
+                "publishedBefore": published_before,
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        payload = r.json() or {}
+        items = payload.get("items", []) or []
+
+        candidates = []
+        for item in items:
+            vid = (item.get("id") or {}).get("videoId")
+            snippet = item.get("snippet") or {}
+            if not vid:
+                continue
+            title = snippet.get("title") or ""
+            description = snippet.get("description") or ""
+            text_blob = f"{title} {description}"
+            hs = _youtube_team_score(home, text_blob)
+            aas = _youtube_team_score(away, text_blob)
+            if hs < 0.62 or aas < 0.62:
+                continue
+
+            low = norm_name(title)
+            keyword_bonus = 0
+            for kw in ("highlight", "highlights", "resumen", "obzor", "обзор", "goals", "extended"):
+                if kw in low:
+                    keyword_bonus += 1
+            bad_penalty = 0
+            for kw in ("prediction", "predictions", "preview", "transfer", "news", "reaction"):
+                if kw in low:
+                    bad_penalty += 1
+
+            channel = snippet.get("channelTitle") or ""
+            channel_blob = norm_name(channel)
+            official_bonus = 0
+            if norm_name(home) in channel_blob or norm_name(away) in channel_blob:
+                official_bonus += 2
+
+            score = (hs + aas) / 2 + keyword_bonus * 0.04 + official_bonus * 0.03 - bad_penalty * 0.10
+            candidates.append((score, keyword_bonus, official_bonus, -bad_penalty, item))
+
+        if not candidates:
+            print("YOUTUBE SEARCH:", home, "vs", away, "0")
+            YOUTUBE_CACHE[cache_key] = None
+            return None
+
+        candidates.sort(key=lambda x: x[:-1], reverse=True)
+        best = candidates[0][-1]
+        vid = (best.get("id") or {}).get("videoId")
+        title = (best.get("snippet") or {}).get("title") or ""
+        url = f"https://www.youtube.com/watch?v={vid}" if vid else None
+        result = {"url": url, "title": title}
+        YOUTUBE_CACHE[cache_key] = result
+        print("YOUTUBE FOUND:", home, "vs", away, url, title)
+        return result
+    except Exception as e:
+        print("YOUTUBE SEARCH ERROR:", home, "vs", away, str(e))
+        YOUTUBE_CACHE[cache_key] = None
+        return None
 
 
 def get_matches(date_string):
@@ -927,21 +1047,28 @@ def publish_matches(date_string, title):
                     direct = get_target_highlights(home, away, date_string)
                     h = highlight_for_match(m, direct) if direct else None
 
+                source_label = "HIGHLIGHTLY"
                 if h:
                     url = h.get("url") or h.get("embedUrl")
-                    if url and url.startswith(("http://", "https://")):
-                        buttons.append([{
-                            "text": f"🎥 {home} — {away}",
-                            "url": url,
-                        }])
-                        matched_highlights += 1
-                        print("HIGHLIGHT FOUND:", home, "vs", away, url)
+                else:
+                    yt = youtube_search_highlight(home, away, date_string)
+                    url = yt.get("url") if yt else None
+                    source_label = "YOUTUBE"
+
+                if url and url.startswith(("http://", "https://")):
+                    buttons.append([{
+                        "text": f"🎥 {home} — {away}",
+                        "url": url,
+                    }])
+                    matched_highlights += 1
+                    print(f"HIGHLIGHT FOUND ({source_label}):", home, "vs", away, url)
 
         reply_markup = {"inline_keyboard": buttons[:5]} if buttons else None
         send_photo(img, caption, reply_markup=reply_markup)
 
     print("HIGHLIGHTS MATCHED:", matched_highlights)
     print("HIGHLIGHTS DIRECT REQUESTS:", len(TARGET_HIGHLIGHTS_CACHE))
+    print("YOUTUBE SEARCH REQUESTS:", len(YOUTUBE_CACHE))
     if not matched_highlights and all_highlights:
         sample = []
         for h in all_highlights[:5]:
