@@ -18,8 +18,8 @@ W = 1080
 MAX_MATCHES = 5
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REGULAR = os.path.join(HERE, "fonts", "DejaVuSans.ttf")
-BOLD = os.path.join(HERE, "fonts", "DejaVuSans-Bold.ttf")
+REGULAR = os.path.join(HERE, "..", "api", "fonts", "DejaVuSans.ttf")
+BOLD = os.path.join(HERE, "..", "api", "fonts", "DejaVuSans-Bold.ttf")
 
 LEAGUES = {
     "eng.1": "ANGLIYA — PREMIER LIGA",
