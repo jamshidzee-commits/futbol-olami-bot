@@ -1,0 +1,45 @@
+name: Futbol olami results
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Тест: отправить последние 3 завершённых матча, игнорируя sent.json"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: futbol-olami-results
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Post finished matches
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          TEST_MODE: ${{ github.event.inputs.test }}
+        run: python scripts/post_results.py
+
+      - name: Save sent matches
+        run: |
+          git config user.name "futbol-olami-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add sent.json
+          git diff --cached --quiet || (git commit -m "update sent matches" && git push)
