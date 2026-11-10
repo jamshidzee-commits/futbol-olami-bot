@@ -6,87 +6,91 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-API_KEY = os.environ["FOOTBALL_API_KEY"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 TEST_MODE = os.environ.get("TEST_MODE", "false") == "true"
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
-API_URL = "https://v3.football.api-sports.io/fixtures"
+ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer/{code}/scoreboard"
 SENT_FILE = "sent.json"
 
+# Код лиги в ESPN -> красивое название
 LEAGUES = {
-    39: "🇬🇧 Premier League",
-    140: "🇪🇸 La Liga",
-    135: "🇮🇹 Serie A",
-    78: "🇩🇪 Bundesliga",
-    61: "🇫🇷 Ligue 1",
-    2: "🏆 Champions League",
-    3: "🏆 Europa League",
-    848: "🏆 Conference League",
+    "eng.1": "🇬🇧 Premier League",
+    "esp.1": "🇪🇸 La Liga",
+    "ita.1": "🇮🇹 Serie A",
+    "ger.1": "🇩🇪 Bundesliga",
+    "fra.1": "🇫🇷 Ligue 1",
+    "uefa.champions": "🏆 Champions League",
+    "uefa.europa": "🏆 Europa League",
+    "uefa.europa.conf": "🏆 Conference League",
 }
-
-FINISHED = {"FT", "AET", "PEN"}
 
 
 def load_sent():
     try:
         with open(SENT_FILE, encoding="utf-8") as f:
             return set(json.load(f))
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return set()
 
 
 def save_sent(sent):
     with open(SENT_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(sent)[-2000:], f)
+        json.dump(sorted(sent)[-3000:], f)
 
 
-def get_fixtures(date_string):
-    r = requests.get(
-        API_URL,
-        headers={"x-apisports-key": API_KEY},
-        params={"date": date_string, "timezone": "Asia/Tashkent"},
-        timeout=30,
-    )
-    data = r.json()
-    if data.get("errors"):
-        print("API ERROR:", data["errors"])
+def get_events(code, date_string):
+    try:
+        r = requests.get(
+            ESPN.format(code=code),
+            params={"dates": date_string.replace("-", ""), "limit": 100},
+            timeout=30,
+        )
+        r.raise_for_status()
+        events = r.json().get("events", [])
+        print("ESPN", code, date_string, "events:", len(events))
+        return events
+    except Exception as e:
+        print("ESPN ERROR", code, date_string, e)
         return []
-    return data.get("response", [])
 
 
-def league_label(m):
-    league = m["league"]
-    if league["id"] in LEAGUES:
-        return LEAGUES[league["id"]]
-    if league.get("country") == "Uzbekistan":
-        return "🇺🇿 " + league.get("name", "Uzbekistan")
-    return None
+def parse_event(ev):
+    comp = ev["competitions"][0]
+    status = comp["status"]["type"]
+    if not status.get("completed"):
+        return None
+    teams = {c["homeAway"]: c for c in comp["competitors"]}
+    home, away = teams["home"], teams["away"]
+    return {
+        "id": ev["id"],
+        "date": ev.get("date", ""),
+        "home": home["team"]["displayName"],
+        "away": away["team"]["displayName"],
+        "hg": int(float(home.get("score", 0) or 0)),
+        "ag": int(float(away.get("score", 0) or 0)),
+        "shootout": status.get("name") == "STATUS_FINAL_PEN",
+        "aet": status.get("name") == "STATUS_FINAL_AET",
+    }
 
 
 def make_text(m, label):
-    home = html.escape(m["teams"]["home"]["name"])
-    away = html.escape(m["teams"]["away"]["name"])
-    hg = m["goals"]["home"]
-    ag = m["goals"]["away"]
-    status = m["fixture"]["status"]["short"]
+    home = html.escape(m["home"])
+    away = html.escape(m["away"])
+    hg, ag = m["hg"], m["ag"]
 
     if hg > ag:
-        home_line = f"✅ <b>{home}</b>"
-        away_line = f"▫️ {away}"
+        home_line, away_line = f"✅ <b>{home}</b>", f"▫️ {away}"
     elif ag > hg:
-        home_line = f"▫️ {home}"
-        away_line = f"✅ <b>{away}</b>"
+        home_line, away_line = f"▫️ {home}", f"✅ <b>{away}</b>"
     else:
-        home_line = f"🤝 {home}"
-        away_line = f"🤝 {away}"
+        home_line, away_line = f"🤝 {home}", f"🤝 {away}"
 
     extra = ""
-    if status == "AET":
+    if m["aet"]:
         extra = "\n⏱ Qo‘shimcha vaqtdan so‘ng"
-    elif status == "PEN":
-        pen = m.get("score", {}).get("penalty", {})
-        extra = f"\n🥅 Penaltilar: {pen.get('home')}:{pen.get('away')}"
+    elif m["shootout"]:
+        extra = "\n🥅 Penaltilar seriyasida"
 
     return (
         "⚽ <b>FUTBOL OLAMI</b>\n"
@@ -117,21 +121,23 @@ def send(text):
 
 def main():
     now = datetime.now(TASHKENT)
+    # Тест: смотрим 7 дней назад, обычный запуск: вчера и сегодня
+    days_back = 7 if TEST_MODE else 1
     dates = [
-        (now - timedelta(days=1)).strftime("%Y-%m-%d"),
-        now.strftime("%Y-%m-%d"),
+        (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        for i in range(days_back, -1, -1)
     ]
 
     finished = []
-    for d in dates:
-        for m in get_fixtures(d):
-            if m["fixture"]["status"]["short"] not in FINISHED:
-                continue
-            label = league_label(m)
-            if label:
-                finished.append((m, label))
+    for code, label in LEAGUES.items():
+        for d in dates:
+            for ev in get_events(code, d):
+                m = parse_event(ev)
+                if m:
+                    finished.append((m, label))
 
-    finished.sort(key=lambda x: x[0]["fixture"]["timestamp"])
+    finished.sort(key=lambda x: x[0]["date"])
+    print("FINISHED FOUND:", len(finished))
     sent = load_sent()
 
     if TEST_MODE:
@@ -141,11 +147,11 @@ def main():
         return
 
     for m, label in finished:
-        fid = str(m["fixture"]["id"])
-        if fid in sent:
+        key = f"espn-{m['id']}"
+        if key in sent:
             continue
         if send(make_text(m, label)):
-            sent.add(fid)
+            sent.add(key)
 
     save_sent(sent)
 
