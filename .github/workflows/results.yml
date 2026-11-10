@@ -32,7 +32,6 @@ jobs:
       - name: Post finished matches
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           TEST_MODE: ${{ github.event.inputs.test }}
         run: python scripts/post_results.py
