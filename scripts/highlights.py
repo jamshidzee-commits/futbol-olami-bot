@@ -67,3 +67,57 @@ def find_video(m):
     а ролик должен быть опубликован после конца матча."""
     after = m["end"] - timedelta(hours=1)
     for ch_id in OFFICIAL_CHANNELS:
+        r = requests.get("https://www.googleapis.com/youtube/v3/search", params={
+            "key": YT_KEY, "part": "snippet", "type": "video", "maxResults": 10,
+            "channelId": ch_id, "order": "date",
+            "q": f"{m['home']} {m['away']}",
+            "publishedAfter": after.strftime("%Y-%m-%dT%H:%M:%SZ")}, timeout=30).json()
+        for it in r.get("items", []):
+            title = it["snippet"]["title"].lower()
+            if short(m["home"]) in title and short(m["away"]) in title:
+                return f"https://www.youtube.com/watch?v={it['id']['videoId']}"
+    return None
+
+def text(m, url):
+    return (f"⚽ <b>{html.escape(m['home'])} {m['hg']}:{m['ag']} {html.escape(m['away'])}</b>\n"
+            f"🏆 {m['league']}\n\n🎬 O'yin sharhi: {url}\n\n<b>FUTBOL OLAMI</b>")
+
+def handle_buttons(s):
+    ups = tg("getUpdates", offset=s["offset"], timeout=0, allowed_updates=["callback_query"]).get("result", [])
+    for u in ups:
+        s["offset"] = u["update_id"] + 1
+        q = u.get("callback_query")
+        if not q or str(q["from"]["id"]) != str(ADMIN_ID):
+            continue
+        action, mid = q["data"].split(":", 1)
+        item = s["offered"].get(mid)
+        if action == "pub" and item and not item.get("done"):
+            tg("sendMessage", chat_id=CHANNEL_ID, text=item["text"], parse_mode="HTML")
+            item["done"] = "published"
+            note = "✅ Kanalga joylandi"
+        else:
+            if item: item["done"] = "skipped"
+            note = "❌ O'tkazib yuborildi"
+        tg("answerCallbackQuery", callback_query_id=q["id"], text=note)
+        tg("editMessageReplyMarkup", chat_id=q["message"]["chat"]["id"],
+           message_id=q["message"]["message_id"], reply_markup={"inline_keyboard": []})
+
+def offer_new(s):
+    now = datetime.now(TASHKENT)
+    for m in finished_matches():
+        if m["id"] in s["offered"] or now - m["end"] > timedelta(hours=30):
+            continue
+        url = find_video(m)
+        if not url:
+            continue
+        t = text(m, url)
+        tg("sendMessage", chat_id=ADMIN_ID, text=t, parse_mode="HTML",
+           reply_markup={"inline_keyboard": [[{"text": "✅ Kanalga", "callback_data": f"pub:{m['id']}"},
+                                              {"text": "❌ Kerak emas", "callback_data": f"skip:{m['id']}"}]]})
+        s["offered"][m["id"]] = {"text": t}
+
+if __name__ == "__main__":
+    s = load()
+    handle_buttons(s)
+    offer_new(s)
+    save(s)
