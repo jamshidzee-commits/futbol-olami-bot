@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: futbol-olami-highlights
+  group: futbol-olami-git  # один общий слот, чтобы два workflow не пушили одновременно
   cancel-in-progress: false
 
 jobs:
@@ -43,6 +43,8 @@ jobs:
           git add highlights.json
           if ! git diff --cached --quiet; then
             git commit -m "update highlights"
-            git pull --rebase
-            git push
+            for i in 1 2 3 4 5; do
+              git pull --rebase --autostash && git push && break
+              echo "push не прошёл, повтор $i"; sleep $((i*3))
+            done
           fi
