@@ -111,6 +111,30 @@ def handle_buttons(s):
         tg("editMessageReplyMarkup", chat_id=q["message"]["chat"]["id"],
            message_id=q["message"]["message_id"], reply_markup={"inline_keyboard": []})
 
+# ---------- Kirill -> Lotin ----------
+_MAP = {"а":"a","б":"b","в":"v","г":"g","ғ":"g‘","д":"d","ё":"yo","ж":"j","з":"z","и":"i",
+        "й":"y","к":"k","қ":"q","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r","с":"s",
+        "т":"t","у":"u","ў":"o‘","ф":"f","х":"x","ҳ":"h","ц":"ts","ч":"ch","ш":"sh","щ":"sh",
+        "ъ":"ʼ","ы":"i","ь":"","э":"e","ю":"yu","я":"ya"}
+_VOW = set("аеёиоуўэюяaeiou")
+
+def lotin(text):
+    out = []
+    for i, ch in enumerate(text):
+        low = ch.lower()
+        prev = text[i - 1].lower() if i else " "
+        if low == "е":
+            r = "ye" if (not prev.isalpha() or prev in _VOW or prev in "ъь") else "e"
+        elif low in _MAP:
+            r = _MAP[low]
+        else:
+            out.append(ch); continue
+        if ch.isupper() and r:
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            r = r.upper() if (nxt.isupper() or (prev.isupper() and not nxt.isalpha())) else r[0].upper() + r[1:]
+        out.append(r)
+    return "".join(out)
+
 # ---------- YANGILIKLAR (новости) ----------
 # RSS-ленты узбекских сайтов. Если какая-то не работает, в логе будет "NEWS ... 0 ta".
 FEEDS = {
@@ -145,7 +169,7 @@ def read_feed(name, url):
         except Exception:
             dt = None
         if title and link:
-            items.append({"source": name, "title": title, "link": link, "desc": desc, "dt": dt})
+            items.append({"source": name, "title": lotin(title), "link": link, "desc": lotin(desc), "dt": dt})
     print("NEWS", name, len(items), "ta")
     return items
 
