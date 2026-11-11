@@ -33,6 +33,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          GROUP_ID: ${{ secrets.GROUP_ID }}
           TEST_MODE: ${{ github.event.inputs.test }}
         run: python scripts/post_results.py
 
