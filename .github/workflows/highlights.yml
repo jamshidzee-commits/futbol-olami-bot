@@ -1,0 +1,41 @@
+name: Futbol olami highlights
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: futbol-olami-highlights
+  cancel-in-progress: false
+
+jobs:
+  highlights:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Highlights
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: python scripts/highlights.py
+      - name: Save state
+        run: |
+          git config user.name "futbol-olami-bot"
+          git config user.email "bot@users.noreply.github.com"
+          [ -f highlights.json ] || exit 0
+          git add highlights.json
+          if ! git diff --cached --quiet; then
+            git commit -m "update highlights"
+            git pull --rebase
+            git push
+          fi
