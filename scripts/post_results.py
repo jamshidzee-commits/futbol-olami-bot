@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 TEST_MODE = os.environ.get("TEST_MODE", "false") == "true"
+GROUP_ID = os.environ.get("GROUP_ID", "").strip()  # masalan @uzb_fut_fan_club
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer/{code}/scoreboard"
@@ -240,18 +241,25 @@ def paginate(items):
     return pages
 
 
+def _send_photo_to(chat_id, data_bytes, caption):
+    r = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+        data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+        files={"photo": ("futbol-olami.jpg", BytesIO(data_bytes), "image/jpeg")},
+        timeout=30,
+    )
+    print("TELEGRAM", chat_id, ":", r.status_code, r.text[:200])
+    return r.ok
+
+
 def send_photo(img, caption):
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=92, optimize=True)
-    buf.seek(0)
-    r = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-        data={"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"},
-        files={"photo": ("futbol-olami.jpg", buf, "image/jpeg")},
-        timeout=30,
-    )
-    print("TELEGRAM:", r.status_code, r.text[:200])
-    return r.ok
+    data_bytes = buf.getvalue()
+    ok = _send_photo_to(CHANNEL_ID, data_bytes, caption)
+    if ok and GROUP_ID:
+        _send_photo_to(GROUP_ID, data_bytes, caption)
+    return ok
 
 
 def post(items, title):
