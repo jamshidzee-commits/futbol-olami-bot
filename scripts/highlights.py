@@ -9,6 +9,7 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]
 ADMIN_ID = os.environ["ADMIN_CHAT_ID"]
 YT_KEY = os.environ["YOUTUBE_API_KEY"]
 TEST = os.environ.get("TEST_MODE", "false") == "true"
+GROUP_ID = os.environ.get("GROUP_ID", "").strip()  # masalan @uzb_fut_fan_club
 TG = f"https://api.telegram.org/bot{BOT}/"
 TASHKENT = ZoneInfo("Asia/Tashkent")
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer/{code}/scoreboard"
@@ -102,6 +103,8 @@ def handle_buttons(s):
         item = s["offered"].get(mid)
         if action == "pub" and item and not item.get("done"):
             tg("sendMessage", chat_id=CHANNEL_ID, text=item["text"], parse_mode="HTML")
+            if GROUP_ID:
+                tg("sendMessage", chat_id=GROUP_ID, text=item["text"], parse_mode="HTML")
             item["done"] = "published"
             note = "✅ Kanalga joylandi"
         else:
