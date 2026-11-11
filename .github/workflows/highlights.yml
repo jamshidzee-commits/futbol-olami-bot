@@ -32,6 +32,7 @@ jobs:
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GROUP_ID: ${{ secrets.GROUP_ID }}
           TEST_MODE: ${{ github.event.inputs.test }}
         run: python scripts/highlights.py
       - name: Save state
