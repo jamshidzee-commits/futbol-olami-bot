@@ -82,10 +82,14 @@ def get_events(code, date_string):
         return []
 
 
-def parse_event(ev):
+def parse_event(ev, upcoming=False):
     comp = ev["competitions"][0]
     status = comp["status"]["type"]
-    if not status.get("completed"):
+    if upcoming:
+        # Только матчи, которые ещё не начались
+        if status.get("state") != "pre":
+            return None
+    elif not status.get("completed"):
         return None
     teams = {c["homeAway"]: c for c in comp["competitors"]}
     home, away = teams["home"], teams["away"]
@@ -101,6 +105,7 @@ def parse_event(ev):
         "ag": int(float(away.get("score", 0) or 0)),
         "note": {"STATUS_FINAL_AET": "QO'SHIMCHA VAQT",
                  "STATUS_FINAL_PEN": "PENALTILAR"}.get(status.get("name"), ""),
+        "upcoming": upcoming,
     }
 
 
@@ -168,7 +173,7 @@ def draw_match(img, y, m):
 
     d.rounded_rectangle((490, y + 27, 590, y + 88), 13, fill=(8, 58, 84, 255),
                         outline=(55, 160, 215, 230), width=2)
-    center = f"{m['hg']} : {m['ag']}"
+    center = "VS" if m.get("upcoming") else f"{m['hg']} : {m['ag']}"
     box = d.textbbox((0, 0), center, font=F(24, True))
     d.text((540 - (box[2] - box[0]) / 2, y + 41), center, font=F(24, True), fill=(255, 255, 255, 255))
 
@@ -279,8 +284,8 @@ def post(items, title):
     return ok_ids
 
 
-def main():
-    now = datetime.now(TASHKENT)
+def post_finished(now, sent):
+    """Итоги матчей за вчера и сегодня — только те, что ещё не отправлены."""
     days_back = 7 if TEST_MODE else 1
     dates = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days_back, -1, -1)]
 
@@ -292,7 +297,6 @@ def main():
                 if m and m["id"] not in seen:
                     seen.add(m["id"])
                     finished.append((label, m))
-
     finished.sort(key=lambda x: x[1]["dt"])
     print("FINISHED FOUND:", len(finished))
 
@@ -301,14 +305,48 @@ def main():
         post(finished[-3:], "O'YIN NATIJALARI")
         return
 
-    sent = load_sent()
     fresh = [(l, m) for l, m in finished if f"espn-{m['id']}" not in sent]
     if not fresh:
-        print("NOTHING NEW")
+        print("NOTHING NEW (results)")
         return
     for mid in post(fresh, "O'YIN NATIJALARI"):
         sent.add(f"espn-{mid}")
-    save_sent(sent)
+
+
+def post_upcoming(now, sent):
+    """Программа на сегодня — один раз в день, начиная с 08:00 по Ташкенту."""
+    key = f"upcoming-{now:%Y-%m-%d}"
+    if TEST_MODE:
+        key = None  # в тестовом режиме отправляем всегда
+    elif now.hour < 8 or key in sent:
+        return
+
+    today = now.strftime("%Y-%m-%d")
+    items, seen = [], set()
+    for code, label in LEAGUES.items():
+        for ev in get_events(code, today):
+            m = parse_event(ev, upcoming=True)
+            if m and m["id"] not in seen:
+                seen.add(m["id"])
+                items.append((label, m))
+    items.sort(key=lambda x: x[1]["dt"])
+    print("UPCOMING FOUND:", len(items))
+
+    if not items:
+        if key:
+            sent.add(key)  # сегодня матчей нет — не проверяем до завтра
+        return
+    if post(items, "BUGUNGI O'YINLAR") and key:
+        sent.add(key)
+
+
+def main():
+    now = datetime.now(TASHKENT)
+    sent = load_sent()
+    post_finished(now, sent)
+    post_upcoming(now, sent)
+    if not TEST_MODE:
+        save_sent(sent)
 
 
 if __name__ == "__main__":
