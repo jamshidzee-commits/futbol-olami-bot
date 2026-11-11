@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: futbol-olami-results
+  group: futbol-olami-git  # один общий слот, чтобы два workflow не пушили одновременно
   cancel-in-progress: false
 
 jobs:
@@ -50,6 +50,8 @@ jobs:
             echo "O'zgarish yo'q"
           else
             git commit -m "update sent matches"
-            git pull --rebase
-            git push
+            for i in 1 2 3 4 5; do
+              git pull --rebase --autostash && git push && break
+              echo "push не прошёл, повтор $i"; sleep $((i*3))
+            done
           fi
