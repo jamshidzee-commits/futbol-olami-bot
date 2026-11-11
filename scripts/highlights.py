@@ -30,9 +30,13 @@ def save(s):
     json.dump(s, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
 
 def tg(method, **data):
-    r = requests.post(TG + method, json=data, timeout=30)
-    print(method, r.status_code, r.text[:150])
-    return r.json()
+    try:
+        r = requests.post(TG + method, json=data, timeout=30)
+        print(method, r.status_code, r.text[:150])
+        return r.json()
+    except Exception as e:  # сеть / не-JSON ответ не должны ронять весь запуск
+        print("TG ERROR", method, e)
+        return {"ok": False, "result": []}
 
 def finished_matches():
     now = datetime.now(TASHKENT)
@@ -77,11 +81,15 @@ def find_video(m):
     for ch_id, (_, codes) in OFFICIAL_CHANNELS.items():
         if m["code"] not in codes:
             continue
-        r = requests.get("https://www.googleapis.com/youtube/v3/search", params={
-            "key": YT_KEY, "part": "snippet", "type": "video", "maxResults": 10,
-            "channelId": ch_id, "order": "date",
-            "q": f"{m['home']} {m['away']}",
-            "publishedAfter": after.strftime("%Y-%m-%dT%H:%M:%SZ")}, timeout=30).json()
+        try:
+            r = requests.get("https://www.googleapis.com/youtube/v3/search", params={
+                "key": YT_KEY, "part": "snippet", "type": "video", "maxResults": 10,
+                "channelId": ch_id, "order": "date",
+                "q": f"{m['home']} {m['away']}",
+                "publishedAfter": after.strftime("%Y-%m-%dT%H:%M:%SZ")}, timeout=30).json()
+        except Exception as e:
+            print("YOUTUBE ERROR", m["home"], m["away"], e)
+            continue
         for it in r.get("items", []):
             title = it["snippet"]["title"].lower()
             if short(m["home"]) in title and short(m["away"]) in title:
@@ -93,6 +101,8 @@ def text(m, url):
             f"🏆 {m['league']}\n\n🎬 O'yin sharhi: {url}\n\n<b>FUTBOL OLAMI</b>")
 
 def handle_buttons(s):
+    # Vercel-бот удалён: если у бота остался webhook, getUpdates вернёт 409 и кнопки не сработают
+    tg("deleteWebhook", drop_pending_updates=False)
     ups = tg("getUpdates", offset=s["offset"], timeout=0, allowed_updates=["callback_query"]).get("result", [])
     for u in ups:
         s["offset"] = u["update_id"] + 1
@@ -251,8 +261,13 @@ def offer_new(s):
         sent += 1
 
 if __name__ == "__main__":
+    import traceback
     s = load()
-    handle_buttons(s)
-    offer_new(s)
-    offer_news(s)
+    for step in (handle_buttons, offer_new, offer_news):
+        try:
+            step(s)
+        except Exception:
+            # Одна ошибка не должна останавливать остальные этапы и сохранение состояния
+            print("STEP FAILED:", step.__name__)
+            traceback.print_exc()
     save(s)
