@@ -40,5 +40,15 @@ jobs:
         run: |
           git config user.name "futbol-olami-bot"
           git config user.email "bot@users.noreply.github.com"
+          if [ ! -f sent.json ]; then
+            echo "sent.json yo'q — saqlanadigan narsa yo'q"
+            exit 0
+          fi
           git add sent.json
-          git diff --cached --quiet || (git commit -m "update sent matches" && git push)
+          if git diff --cached --quiet; then
+            echo "O'zgarish yo'q"
+          else
+            git commit -m "update sent matches"
+            git pull --rebase
+            git push
+          fi
