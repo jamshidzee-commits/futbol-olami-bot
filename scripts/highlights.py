@@ -263,7 +263,9 @@ def offer_new(s):
 if __name__ == "__main__":
     import traceback
     s = load()
-    for step in (handle_buttons, offer_new, offer_news):
+    # ONLY_BUTTONS=1 — только обработать нажатия кнопок (быстро, без YouTube и новостей)
+    steps = (handle_buttons,) if os.environ.get("ONLY_BUTTONS") == "1" else (handle_buttons, offer_new, offer_news)
+    for step in steps:
         try:
             step(s)
         except Exception:
