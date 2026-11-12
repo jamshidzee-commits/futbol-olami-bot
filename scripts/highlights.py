@@ -161,6 +161,29 @@ FOOTBALL_WORDS = ["futbol", "футбол", "gol", "гол", "superliga", "су�
                   "пахтакор", "liga", "лига", "real", "barselona", "барселона", "chempionlar", "чемпионлар"]
 NEWS_PER_RUN = 3
 
+# Зарубежные сайты (английский). Новости переводятся на узбекский (латиница) и приходят тебе в личку.
+FOREIGN_FEEDS = {
+    "BBC Sport": "https://feeds.bbci.co.uk/sport/football/rss.xml",
+    "Sky Sports": "https://www.skysports.com/rss/12040",
+    "The Guardian": "https://www.theguardian.com/football/rss",
+    "ESPN": "https://www.espn.com/espn/rss/soccer/news",
+}
+FOREIGN_PER_RUN = 2  # сколько зарубежных новостей присылать за один раз (каждые 30 минут)
+
+def tarjima(t):
+    """Перевод на узбекский (латиница) через бесплатный Google Translate. При ошибке — оригинал."""
+    if not t:
+        return t
+    try:
+        r = requests.get("https://translate.googleapis.com/translate_a/single",
+                         params={"client": "gtx", "sl": "auto", "tl": "uz", "dt": "t", "q": t[:1500]},
+                         timeout=20)
+        out = "".join(p[0] for p in r.json()[0] if p and p[0])
+        return out or t
+    except Exception as e:
+        print("TARJIMA xato:", e)
+        return t
+
 def clean(t):
     t = re.sub(r"<[^>]+>", " ", t or "")
     return re.sub(r"\s+", " ", html.unescape(t)).strip()
@@ -187,7 +210,7 @@ def read_feed(name, url):
     return items
 
 def is_football(n):
-    if n["source"] == "sports.uz":
+    if n["source"] == "sports.uz" or n["source"] in FOREIGN_FEEDS:
         return True
     text_ = (n["title"] + " " + n["desc"]).lower()
     return any(w in text_ for w in FOOTBALL_WORDS)
@@ -203,10 +226,14 @@ def news_text(n):
     return body
 
 def offer_news(s):
+    _offer(s, FEEDS, "news_init", NEWS_PER_RUN, foreign=False)
+    _offer(s, FOREIGN_FEEDS, "foreign_init", FOREIGN_PER_RUN, foreign=True)
+
+def _offer(s, feeds, init_key, per_run, foreign):
     seen = s.setdefault("news_seen", [])
-    first_run = not s.get("news_init")
+    first_run = not s.get(init_key)
     all_news = []
-    for name, url in FEEDS.items():
+    for name, url in feeds.items():
         all_news += [n for n in read_feed(name, url) if is_football(n)]
     now = datetime.now(TASHKENT)
     fresh = []
@@ -221,17 +248,19 @@ def offer_news(s):
     if first_run and not TEST:
         # Birinchi ishga tushishda eski yangiliklarni yubormaymiz, faqat eslab qolamiz
         seen += [n["key"] for n in fresh]
-        s["news_init"] = True
+        s[init_key] = True
         print("NEWS: birinchi ishga tushish,", len(fresh), "ta yangilik eslab qolindi")
         return
-    for n in fresh[:2 if TEST else NEWS_PER_RUN]:
+    for n in fresh[:2 if TEST else per_run]:
+        if foreign:
+            n["title"], n["desc"] = tarjima(n["title"]), tarjima(n["desc"])
         t = news_text(n)
         tg("sendMessage", chat_id=ADMIN_ID, text=t, parse_mode="HTML",
            reply_markup={"inline_keyboard": [[{"text": "✅ Kanalga", "callback_data": f"pub:{n['key']}"},
                                               {"text": "❌ Kerak emas", "callback_data": f"skip:{n['key']}"}]]})
         s["offered"][n["key"]] = {"text": t}
         seen.append(n["key"])
-    s["news_init"] = True
+    s[init_key] = True
     s["news_seen"] = seen[-2000:]
 
 def offer_new(s):
