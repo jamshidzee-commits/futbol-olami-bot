@@ -1,0 +1,81 @@
+name: Futbol olami bot
+
+# Работает сам по кругу: один запуск длится ~55 минут, в конце сам запускает следующий.
+# Внутри: кнопки "Kanalga" — каждую минуту, результаты — каждые 10 минут,
+# обзоры и новости — каждые 30 минут. Расписание раз в час — запасной вариант,
+# если цепочка вдруг прервётся.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: futbol-olami-git
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests Pillow
+
+      - name: Bot ishlayapti (55 daqiqa)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GROUP_ID: ${{ secrets.GROUP_ID }}
+        run: |
+          git config user.name "futbol-olami-bot"
+          git config user.email "bot@users.noreply.github.com"
+          save() {
+            touch sent.json highlights.json
+            git add sent.json highlights.json
+            git diff --cached --quiet && return 0
+            git commit -q -m "update state"
+            for i in 1 2 3 4 5; do
+              git pull -q --rebase --autostash && git push -q && return 0
+              sleep $((i*3))
+            done
+          }
+          end=$((SECONDS + 55*60))
+          m=0
+          while [ $SECONDS -lt $end ]; do
+            if [ $((m % 30)) -eq 0 ]; then
+              python scripts/highlights.py || echo "highlights xato"
+            else
+              ONLY_BUTTONS=1 python scripts/highlights.py || echo "buttons xato"
+            fi
+            if [ $((m % 10)) -eq 0 ]; then
+              python scripts/post_results.py || echo "results xato"
+            fi
+            save || echo "save xato"
+            m=$((m + 1))
+            sleep 60
+          done
+
+      - name: Keyingi ishga tushirish
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          waiting=$(gh run list -R "$GITHUB_REPOSITORY" -w bot.yml -L 20 --json status \
+            -q '[.[] | select(.status=="queued" or .status=="pending" or .status=="waiting" or .status=="requested")] | length')
+          if [ "$waiting" = "0" ]; then
+            gh workflow run bot.yml -R "$GITHUB_REPOSITORY" --ref main
+          else
+            echo "Keyingi ishga tushirish allaqachon navbatda"
+          fi
