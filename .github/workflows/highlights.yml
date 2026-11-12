@@ -1,50 +1,88 @@
-name: Futbol olami highlights
+import os, json, html, hashlib, re, requests
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-on:
-  schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch:
-    inputs:
-      test:
-        description: "Тест: 2 обзора за 7 дней и 2 новости в личку"
-        required: false
-        default: "false"
+BOT = os.environ["TELEGRAM_BOT_TOKEN"]
+CHANNEL_ID = os.environ["CHANNEL_ID"]
+ADMIN_ID = os.environ["ADMIN_CHAT_ID"]
+YT_KEY = os.environ["YOUTUBE_API_KEY"]
+TEST = os.environ.get("TEST_MODE", "false") == "true"
+GROUP_ID = os.environ.get("GROUP_ID", "").strip()  # masalan @uzb_fut_fan_club
+TG = f"https://api.telegram.org/bot{BOT}/"
+TASHKENT = ZoneInfo("Asia/Tashkent")
+ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer/{code}/scoreboard"
+STATE = "highlights.json"
+LEAGUES = {"eng.1": "Premier Liga", "esp.1": "La Liga", "ita.1": "Seriya A",
+           "ger.1": "Bundesliga", "fra.1": "Ligue 1", "uefa.champions": "Chempionlar Ligasi",
+           "uefa.europa": "Yevropa Ligasi"}
 
-permissions:
-  contents: write
+def load():
+    try:
+        return json.load(open(STATE, encoding="utf-8"))
+    except Exception:
+        return {"offered": {}, "offset": 0}
 
-concurrency:
-  group: futbol-olami-git  # один общий слот, чтобы два workflow не пушили одновременно
-  cancel-in-progress: false
+def save(s):
+    s["offered"] = dict(list(s["offered"].items())[-800:])
+    s["tries"] = dict(list(s.get("tries", {}).items())[-500:])
+    json.dump(s, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
 
-jobs:
-  highlights:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install requests
-      - name: Highlights va yangiliklar
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          GROUP_ID: ${{ secrets.GROUP_ID }}
-          TEST_MODE: ${{ github.event.inputs.test }}
-        run: python scripts/highlights.py
-      - name: Save state
-        run: |
-          git config user.name "futbol-olami-bot"
-          git config user.email "bot@users.noreply.github.com"
-          [ -f highlights.json ] || exit 0
-          git add highlights.json
-          if ! git diff --cached --quiet; then
-            git commit -m "update highlights"
-            for i in 1 2 3 4 5; do
-              git pull --rebase --autostash && git push && break
-              echo "push не прошёл, повтор $i"; sleep $((i*3))
-            done
-          fi
+def tg(method, **data):
+    try:
+        r = requests.post(TG + method, json=data, timeout=30)
+        print(method, r.status_code, r.text[:150])
+        return r.json()
+    except Exception as e:  # сеть / не-JSON ответ не должны ронять весь запуск
+        print("TG ERROR", method, e)
+        return {"ok": False, "result": []}
+
+def finished_matches():
+    now = datetime.now(TASHKENT)
+    out = []
+    for code, league in LEAGUES.items():
+        for i in (range(7, -1, -1) if TEST else (1, 0)):
+            d = (now - timedelta(days=i)).strftime("%Y%m%d")
+            try:
+                evs = requests.get(ESPN.format(code=code), params={"dates": d}, timeout=30).json().get("events", [])
+            except Exception as e:
+                print("ESPN", e); continue
+            for ev in evs:
+                c = ev["competitions"][0]
+                if not c["status"]["type"].get("completed"):
+                    continue
+                t = {x["homeAway"]: x for x in c["competitors"]}
+                end = datetime.fromisoformat(ev["date"].replace("Z", "+00:00")) + timedelta(hours=2)
+                out.append({"id": ev["id"], "code": code, "league": league, "end": end,
+                            "home": t["home"]["team"]["displayName"], "away": t["away"]["team"]["displayName"],
+                            "hg": t["home"].get("score", "0"), "ag": t["away"].get("score", "0")})
+    return out
+
+# Официальные каналы: ID каналов YouTube (начинаются с UC...). Заполни сам.
+# Как найти: открой канал на YouTube -> «О канале» -> «Поделиться» -> «Копировать ID канала».
+# Пример проверенного: UEFA = UCyGa1YEx9ST66rYrJTGIKOw
+# Формат: "ID канала": ("Название", [коды лиг, для которых искать на этом канале])
+# Коды лиг: eng.1, esp.1, ita.1, ger.1, fra.1, uefa.champions, uefa.europa
+OFFICIAL_CHANNELS = {
+    "UCyGa1YEx9ST66rYrJTGIKOw": ("UEFA", ["uefa.champions", "uefa.europa"]),
+}
+MAX_TRIES = 4  # сколько раз искать обзор для одного матча (бережём лимит YouTube)
+
+def short(name):
+    stop = {"fc", "cf", "afc", "club", "united", "city", "real", "de"}
+    words = [w for w in name.lower().replace("-", " ").split() if w not in stop and len(w) > 2]
+    return words[0] if words else name.lower()
+
+def find_video(m):
+    """Ищет обзор только на официальных каналах; название должно содержать ОБЕ команды,
+    а ролик должен быть опубликован после конца матча."""
+    after = m["end"] - timedelta(hours=1)
+    for ch_id, (_, codes) in OFFICIAL_CHANNELS.items():
+        if m["code"] not in codes:
+            continue
+        try:
+            r = requests.get("https://www.googleapis.com/youtube/v3/search", params={
+                "key": YT_KEY, "part": "snippet", "type": "video", "maxResults": 10,
+                "channelId": ch_id, "order": "date",
+                "q": f"{m['home']} {m['away']}",
