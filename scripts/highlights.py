@@ -590,6 +590,9 @@ def news_text(n):
 
 def send_news(chat_id, text, image, small=False, **extra):
     opts = {"url": image, "prefer_large_media": True, "show_above_text": True} if image else {"is_disabled": True}
+    if image and not small and "youtu" in image and image not in text:
+        # havola matnda (ko'rinmas) bo'lsin: aks holda Telegram ba'zan video kartochkasini qurmay, faqat matn qoldiradi
+        text = f'<a href="{html.escape(image)}">&#8203;</a>' + text
     if image and small:  # YouTube-sharh: ixcham ko'rinish (kichik rasm yonida), joy kam egallanadi
         opts = {"url": image, "prefer_small_media": True, "show_above_text": True}
         if image not in text:  # havola matnda bo'lsin (ko'rinmas), shunda Telegram oldindan ko'rinishni aniq quradi
